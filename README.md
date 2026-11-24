@@ -68,7 +68,7 @@ for trace in reading.traces:
     print(trace.label, len(preview.points))
 ```
 
-Format-specific helpers are also exported for OLE2 containers (`ole_layout`, `ole_place`), Shimadzu `.lcd` and `.lcm` files (`shimadzu_read`, `shimadzu_read_lcm`, `shimadzu_properties`, `shimadzu_filetime`, `shimadzu_peak_table`, `shimadzu_deltas`, `shimadzu_trace`, `shimadzu_chromatograms`), Bruker NMR files (`bruker_parse_acqus`, `bruker_read_acqus`, `bruker_read_pdata`, `bruker_read_dir`), and OpenLab archives (`openlab_parse_acaml`, `openlab_read_acaml`, `openlab_read_dx`, `openlab_read_rx`, `openlab_parse_rx_peaks`).
+Format-specific helpers are also exported for OLE2 containers (`ole_layout`, `ole_place`), Shimadzu `.lcd` and `.lcm` files (`shimadzu_read`, `shimadzu_read_run`, `shimadzu_read_lcm`, `shimadzu_properties`, `shimadzu_filetime`, `shimadzu_peak_table`, `shimadzu_deltas`, `shimadzu_trace`, `shimadzu_chromatograms`), Bruker NMR files (`bruker_parse_acqus`, `bruker_read_acqus`, `bruker_read_pdata`, `bruker_read_dir`), and OpenLab archives (`openlab_parse_acaml`, `openlab_read_acaml`, `openlab_read_dx`, `openlab_read_rx`, `openlab_parse_rx_peaks`).
 
 ## Development
 

@@ -30,3 +30,15 @@ Repository = "https://github.com/SequencyLabs/instrument-readers"
 [tool.maturin]
 module-name = "sequency_instruments"
 include = ["sequency_instruments.pyi"]
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "Cargo.toml" },
+    { file = "src/**/*.rs" },
+    { file = "sequency_instruments.pyi" },
+    { file = "../Cargo.toml" },
+    { file = "../src/**/*.rs" },
+    { file = "../../../Cargo.toml" },
+    { file = "../../../Cargo.lock" },
+]

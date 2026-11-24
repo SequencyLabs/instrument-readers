@@ -203,6 +203,33 @@ impl From<RustInstrumentReading> for InstrumentReading {
     }
 }
 
+/// Run summary read from a Shimadzu `.lcd` file's `File Property`, method and peak table streams.
+#[pyclass(get_all)]
+#[derive(Clone)]
+pub struct ShimadzuRun {
+    pub injected: Option<String>,
+    pub sample_name: Option<String>,
+    pub data_file: Option<String>,
+    pub method_file: Option<String>,
+    pub instrument: String,
+    pub method: InstrumentMethod,
+    pub peaks: Vec<Peak>,
+}
+
+impl From<shimadzu::ShimadzuRun> for ShimadzuRun {
+    fn from(run: shimadzu::ShimadzuRun) -> Self {
+        Self {
+            injected: run.injected,
+            sample_name: run.sample_name,
+            data_file: run.data_file,
+            method_file: run.method_file,
+            instrument: run.instrument,
+            method: run.method.into(),
+            peaks: run.peaks.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+
 /// One stream inside an OLE2 compound file and its byte extents.
 #[pyclass]
 #[derive(Clone)]
@@ -360,6 +387,13 @@ fn shimadzu_read(data: &[u8]) -> PyResult<InstrumentReading> {
     py_result(shimadzu::read_lcd(data)).map(Into::into)
 }
 
+/// Reads a Shimadzu `.lcd` file's run summary without decoding its chromatograms, so a damaged trace does not hide
+/// the sample, files, injection time and peaks.
+#[pyfunction]
+fn shimadzu_read_run(data: &[u8]) -> PyResult<ShimadzuRun> {
+    py_result(shimadzu::read_run(data)).map(Into::into)
+}
+
 /// Parses a Shimadzu `.lcm` method file into a unified `InstrumentReading`.
 #[pyfunction]
 fn shimadzu_read_lcm(data: &[u8]) -> PyResult<InstrumentReading> {
@@ -478,6 +512,7 @@ fn sequency_instruments_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Peak>()?;
     m.add_class::<Trace>()?;
     m.add_class::<InstrumentReading>()?;
+    m.add_class::<ShimadzuRun>()?;
     m.add_class::<OleStream>()?;
     m.add_class::<OleLayout>()?;
     m.add_class::<AcqusParams>()?;
@@ -489,6 +524,7 @@ fn sequency_instruments_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ole_layout, m)?)?;
     m.add_function(wrap_pyfunction!(ole_place, m)?)?;
     m.add_function(wrap_pyfunction!(shimadzu_read, m)?)?;
+    m.add_function(wrap_pyfunction!(shimadzu_read_run, m)?)?;
     m.add_function(wrap_pyfunction!(shimadzu_read_lcm, m)?)?;
     m.add_function(wrap_pyfunction!(shimadzu_properties, m)?)?;
     m.add_function(wrap_pyfunction!(shimadzu_filetime, m)?)?;
