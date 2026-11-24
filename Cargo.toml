@@ -1,6 +1,6 @@
 [package]
 name = "sequency-instruments"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Pure-Rust binary instrument file readers for analytical chemistry formats (Shimadzu .lcd, Bruker TopSpin NMR, Agilent OpenLab CDS)."
