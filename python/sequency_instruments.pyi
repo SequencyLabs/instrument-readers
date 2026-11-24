@@ -74,6 +74,9 @@ class AcqusParams:
     solvent: str
     scans: int
     relaxation_delay_s: float
+    sfo1_mhz: float | None
+    bf1_mhz: float | None
+    sw_h_hz: float | None
     data_path: str | None
 
 class OpenLabInjection:
@@ -88,6 +91,7 @@ class OpenLabInjection:
     processing_method: str | None
     status: str | None
     result_file: str | None
+    injection_volume_ul: float | None
 
 class AcamlResultSet:
     injections: list[OpenLabInjection]

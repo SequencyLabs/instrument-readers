@@ -34,17 +34,29 @@ impl GradientStep {
     /// Implied mobile phase line A percentage (`100 - B - C - D`, clamped at zero).
     #[must_use]
     pub fn a_pct(&self) -> f64 {
-        (100.0 - self.b_pct - self.c_pct - self.d_pct).max(0.0)
+        RustGradientStep {
+            time_min: self.time_min,
+            b_pct: self.b_pct,
+            c_pct: self.c_pct,
+            d_pct: self.d_pct,
+        }
+        .a_pct()
     }
 }
 
 impl From<RustGradientStep> for GradientStep {
     fn from(step: RustGradientStep) -> Self {
+        let RustGradientStep {
+            time_min,
+            b_pct,
+            c_pct,
+            d_pct,
+        } = step;
         Self {
-            time_min: step.time_min,
-            b_pct: step.b_pct,
-            c_pct: step.c_pct,
-            d_pct: step.d_pct,
+            time_min,
+            b_pct,
+            c_pct,
+            d_pct,
         }
     }
 }
@@ -70,20 +82,35 @@ pub struct InstrumentMethod {
 
 impl From<RustInstrumentMethod> for InstrumentMethod {
     fn from(method: RustInstrumentMethod) -> Self {
+        let RustInstrumentMethod {
+            name,
+            column,
+            solvents,
+            gradient,
+            flow_rate_ml_min,
+            column_temp_c,
+            injection_volume_ul,
+            wavelength_nm,
+            nucleus,
+            frequency_mhz,
+            pulse_program,
+            scans,
+            relaxation_delay_s,
+        } = method;
         Self {
-            name: method.name,
-            column: method.column,
-            solvents: method.solvents,
-            gradient: method.gradient.into_iter().map(Into::into).collect(),
-            flow_rate_ml_min: method.flow_rate_ml_min,
-            column_temp_c: method.column_temp_c,
-            injection_volume_ul: method.injection_volume_ul,
-            wavelength_nm: method.wavelength_nm,
-            nucleus: method.nucleus,
-            frequency_mhz: method.frequency_mhz,
-            pulse_program: method.pulse_program,
-            scans: method.scans,
-            relaxation_delay_s: method.relaxation_delay_s,
+            name,
+            column,
+            solvents,
+            gradient: gradient.into_iter().map(Into::into).collect(),
+            flow_rate_ml_min,
+            column_temp_c,
+            injection_volume_ul,
+            wavelength_nm,
+            nucleus,
+            frequency_mhz,
+            pulse_program,
+            scans,
+            relaxation_delay_s,
         }
     }
 }
@@ -101,12 +128,19 @@ pub struct Peak {
 
 impl From<RustPeak> for Peak {
     fn from(peak: RustPeak) -> Self {
+        let RustPeak {
+            rt_min,
+            area,
+            area_pct,
+            height,
+            compound,
+        } = peak;
         Self {
-            rt_min: peak.rt_min,
-            area: peak.area,
-            area_pct: peak.area_pct,
-            height: peak.height,
-            compound: peak.compound,
+            rt_min,
+            area,
+            area_pct,
+            height,
+            compound,
         }
     }
 }
@@ -121,38 +155,45 @@ pub struct Trace {
     pub points: Vec<(f64, f64)>,
 }
 
+impl Trace {
+    fn to_rust(&self) -> RustTrace {
+        RustTrace {
+            label: self.label.clone(),
+            x_unit: self.x_unit.clone(),
+            y_unit: self.y_unit.clone(),
+            points: self.points.clone(),
+        }
+    }
+}
+
 #[pymethods]
 impl Trace {
     /// Downsamples points to at most `threshold` points using Largest-Triangle-Three-Buckets.
     #[must_use]
     pub fn downsample_lttb(&self, threshold: usize) -> Self {
-        Self {
-            label: self.label.clone(),
-            x_unit: self.x_unit.clone(),
-            y_unit: self.y_unit.clone(),
-            points: sequency_instruments::lttb(&self.points, threshold),
-        }
+        self.to_rust().downsample_lttb(threshold).into()
     }
 
     /// Downsamples points into `bins` horizontal buckets keeping each bucket's min and max.
     #[must_use]
     pub fn downsample_minmax(&self, bins: usize) -> Self {
-        Self {
-            label: self.label.clone(),
-            x_unit: self.x_unit.clone(),
-            y_unit: self.y_unit.clone(),
-            points: sequency_instruments::minmax_bins(&self.points, bins),
-        }
+        self.to_rust().downsample_minmax(bins).into()
     }
 }
 
 impl From<RustTrace> for Trace {
     fn from(trace: RustTrace) -> Self {
+        let RustTrace {
+            label,
+            x_unit,
+            y_unit,
+            points,
+        } = trace;
         Self {
-            label: trace.label,
-            x_unit: trace.x_unit,
-            y_unit: trace.y_unit,
-            points: trace.points,
+            label,
+            x_unit,
+            y_unit,
+            points,
         }
     }
 }
@@ -190,15 +231,25 @@ impl InstrumentReading {
 
 impl From<RustInstrumentReading> for InstrumentReading {
     fn from(reading: RustInstrumentReading) -> Self {
+        let RustInstrumentReading {
+            technique,
+            vendor_format,
+            acquired_at,
+            sample_name,
+            instrument,
+            method,
+            peaks,
+            traces,
+        } = reading;
         Self {
-            technique: reading.technique.as_str().to_owned(),
-            vendor_format: reading.vendor_format.as_str().to_owned(),
-            acquired_at: reading.acquired_at,
-            sample_name: reading.sample_name,
-            instrument: reading.instrument,
-            method: reading.method.into(),
-            peaks: reading.peaks.into_iter().map(Into::into).collect(),
-            traces: reading.traces.into_iter().map(Into::into).collect(),
+            technique: technique.as_str().to_owned(),
+            vendor_format: vendor_format.as_str().to_owned(),
+            acquired_at,
+            sample_name,
+            instrument,
+            method: method.into(),
+            peaks: peaks.into_iter().map(Into::into).collect(),
+            traces: traces.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -218,14 +269,23 @@ pub struct ShimadzuRun {
 
 impl From<shimadzu::ShimadzuRun> for ShimadzuRun {
     fn from(run: shimadzu::ShimadzuRun) -> Self {
+        let shimadzu::ShimadzuRun {
+            injected,
+            sample_name,
+            data_file,
+            method_file,
+            instrument,
+            method,
+            peaks,
+        } = run;
         Self {
-            injected: run.injected,
-            sample_name: run.sample_name,
-            data_file: run.data_file,
-            method_file: run.method_file,
-            instrument: run.instrument,
-            method: run.method.into(),
-            peaks: run.peaks.into_iter().map(Into::into).collect(),
+            injected,
+            sample_name,
+            data_file,
+            method_file,
+            instrument,
+            method: method.into(),
+            peaks: peaks.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -269,20 +329,39 @@ pub struct AcqusParams {
     pub solvent: String,
     pub scans: u32,
     pub relaxation_delay_s: f64,
+    pub sfo1_mhz: Option<f64>,
+    pub bf1_mhz: Option<f64>,
+    pub sw_h_hz: Option<f64>,
     pub data_path: Option<String>,
 }
 
 impl From<bruker::AcqusParams> for AcqusParams {
     fn from(params: bruker::AcqusParams) -> Self {
+        let bruker::AcqusParams {
+            acquired_at,
+            nucleus,
+            pulse_program,
+            instrument,
+            solvent,
+            scans,
+            relaxation_delay_s,
+            sfo1_mhz,
+            bf1_mhz,
+            sw_h_hz,
+            data_path,
+        } = params;
         Self {
-            acquired_at: params.acquired_at,
-            nucleus: params.nucleus,
-            pulse_program: params.pulse_program,
-            instrument: params.instrument,
-            solvent: params.solvent,
-            scans: params.scans,
-            relaxation_delay_s: params.relaxation_delay_s,
-            data_path: params.data_path,
+            acquired_at,
+            nucleus,
+            pulse_program,
+            instrument,
+            solvent,
+            scans,
+            relaxation_delay_s,
+            sfo1_mhz,
+            bf1_mhz,
+            sw_h_hz,
+            data_path,
         }
     }
 }
@@ -302,22 +381,38 @@ pub struct OpenLabInjection {
     pub processing_method: Option<String>,
     pub status: Option<String>,
     pub result_file: Option<String>,
+    pub injection_volume_ul: Option<f64>,
 }
 
 impl From<openlab::OpenLabInjection> for OpenLabInjection {
     fn from(inj: openlab::OpenLabInjection) -> Self {
+        let openlab::OpenLabInjection {
+            id,
+            data_file,
+            sample_name,
+            sample_type,
+            vial,
+            instrument,
+            acquired_utc,
+            method,
+            processing_method,
+            status,
+            result_file,
+            injection_volume_ul,
+        } = inj;
         Self {
-            id: inj.id,
-            data_file: inj.data_file,
-            sample_name: inj.sample_name,
-            sample_type: inj.sample_type,
-            vial: inj.vial,
-            instrument: inj.instrument,
-            acquired_utc: inj.acquired_utc,
-            method: inj.method,
-            processing_method: inj.processing_method,
-            status: inj.status,
-            result_file: inj.result_file,
+            id,
+            data_file,
+            sample_name,
+            sample_type,
+            vial,
+            instrument,
+            acquired_utc,
+            method,
+            processing_method,
+            status,
+            result_file,
+            injection_volume_ul,
         }
     }
 }
@@ -473,10 +568,10 @@ fn bruker_read_dir(exp_dir: &str) -> PyResult<InstrumentReading> {
 /// Parses an Agilent OpenLab `.acaml` XML document into injections and operator logins.
 #[pyfunction]
 fn openlab_parse_acaml(acaml: &[u8]) -> PyResult<AcamlResultSet> {
-    let parsed = py_result(openlab::parse_acaml(acaml))?;
+    let openlab::AcamlResultSet { injections, logins } = py_result(openlab::parse_acaml(acaml))?;
     Ok(AcamlResultSet {
-        injections: parsed.injections.into_iter().map(Into::into).collect(),
-        logins: parsed.logins.into_iter().collect(),
+        injections: injections.into_iter().map(Into::into).collect(),
+        logins: logins.into_iter().collect(),
     })
 }
 
