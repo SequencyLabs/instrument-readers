@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "sequency-instruments"
+version = "0.1.0"
+description = "Pure-Rust binary instrument file readers for analytical chemistry formats (Shimadzu .lcd, Bruker TopSpin NMR, Agilent OpenLab CDS)."
+license = "MIT OR Apache-2.0"
+requires-python = ">=3.10"
+keywords = ["chemistry", "chromatography", "nmr", "hplc", "spectroscopy"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering :: Chemistry",
+]
+
+[project.urls]
+Homepage = "https://github.com/SequencyLabs/instrument-readers"
+Repository = "https://github.com/SequencyLabs/instrument-readers"
+
+[tool.maturin]
+module-name = "sequency_instruments"
+include = ["sequency_instruments.pyi"]
