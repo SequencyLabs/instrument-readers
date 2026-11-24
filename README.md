@@ -8,7 +8,7 @@ This is a mirror of a folder in our internal codebase. While issues and PRs will
 
 The library extracts unified metadata, method settings, peak tables, and traces from three file families:
 
-- parses Shimadzu LabSolutions `.lcd` files stored in the OLE2 Compound File Binary Format, including `File Property` fields, `GUC.1.METHOD` mobile phases and gradients, `PDA.1.METHOD` wavelengths, `PT-*` peak tables, and delta-encoded chromatograms
+- parses Shimadzu LabSolutions `.lcd` run files and `.lcm` method files stored in the OLE2 Compound File Binary Format, including `File Property` fields, `GUC.1.METHOD` mobile phases, flow, oven temperature, and gradients, `PDA.1.METHOD` wavelengths, `PT-*` peak tables, and delta-encoded chromatograms
 - reads Bruker TopSpin NMR runs, including `acqus` and `procs` JCAMP-DX parameters, `BYTORDP` byte-order handling, `NC_proc` power-of-two scaling, and `1r` real spectra
 - parses Agilent OpenLab CDS `.acaml` XML result sets and zipped `.dx` and `.rx` archives, including `Base/InjectionACAML` peaks and ChemStation `.CH` channels
 
@@ -68,7 +68,7 @@ for trace in reading.traces:
     print(trace.label, len(preview.points))
 ```
 
-Format-specific helpers are also exported for OLE2 containers (`ole_layout`, `ole_place`), Shimadzu `.lcd` streams (`shimadzu_read`, `shimadzu_properties`, `shimadzu_filetime`, `shimadzu_peak_table`, `shimadzu_deltas`, `shimadzu_trace`, `shimadzu_chromatograms`), Bruker NMR files (`bruker_parse_acqus`, `bruker_read_acqus`, `bruker_read_pdata`, `bruker_read_dir`), and OpenLab archives (`openlab_parse_acaml`, `openlab_read_acaml`, `openlab_read_dx`, `openlab_read_rx`, `openlab_parse_rx_peaks`).
+Format-specific helpers are also exported for OLE2 containers (`ole_layout`, `ole_place`), Shimadzu `.lcd` and `.lcm` files (`shimadzu_read`, `shimadzu_read_lcm`, `shimadzu_properties`, `shimadzu_filetime`, `shimadzu_peak_table`, `shimadzu_deltas`, `shimadzu_trace`, `shimadzu_chromatograms`), Bruker NMR files (`bruker_parse_acqus`, `bruker_read_acqus`, `bruker_read_pdata`, `bruker_read_dir`), and OpenLab archives (`openlab_parse_acaml`, `openlab_read_acaml`, `openlab_read_dx`, `openlab_read_rx`, `openlab_parse_rx_peaks`).
 
 ## Development
 

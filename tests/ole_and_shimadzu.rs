@@ -6,7 +6,7 @@ use encoding_rs::GB18030;
 use sequency_instruments::ole::{OLE_MAGIC, OleFile, place};
 use sequency_instruments::shimadzu::{
     chromatograms, decode_deltas, parse_filetime, parse_inj_vol, parse_peak_table,
-    parse_properties, parse_trace, read_lcd,
+    parse_properties, parse_trace, read_lcd, read_lcm, read_run,
 };
 use sequency_instruments::{GradientStep, InstrumentError, Technique, VendorFormat};
 
@@ -778,4 +778,153 @@ fn ole_difat_sector_chain_supports_more_than_109_fat_sectors() {
         ole.stream("BigStream").unwrap().as_ref(),
         payload.as_slice()
     );
+}
+
+#[test]
+fn shimadzu_lcm_method_file_detects_and_parses_method_fields() {
+    let prop =
+        b"<?xml version=\"1.0\"?><FileProperty><dwFileType>16777248</dwFileType></FileProperty>";
+    let config_xml = "<UnitList><Unit><ModelName>CBM-20A</ModelName></Unit></UnitList>";
+    let method_xml = concat!(
+        "<GUD Type=\"SystemParameter\">",
+        "<UPD ID=\"PumpA_MobilePhaseName#1A\"><Val>0.05%磷酸水溶液</Val><Type>8</Type></UPD>",
+        "<UPD ID=\"PumpA_MobilePhaseName#2A\"><Val>乙腈</Val><Type>8</Type></UPD>",
+        "<UPD ID=\"PumpA_Flow\"><Val>00000000</Val><Type>4</Type></UPD>",
+        "<UPD ID=\"LPGE$tflow\"><Val>9A99993F</Val><Type>4</Type></UPD>",
+        "<UPD ID=\"OVEN$use\"><Val>1</Val><Type>2</Type></UPD>",
+        "<UPD ID=\"OVEN$ovent\"><Val>00004842</Val><Type>4</Type></UPD>",
+        "<UPD ID=\"LPGE$cconc\"><Val>00008041</Val><Type>4</Type></UPD>",
+        "<UPD ID=\"LPGE$dconc\"><Val>0000A842</Val><Type>4</Type></UPD>",
+        "<TP PgN=\"SCL$TIMEPROG\">",
+        "<TPLD><TPD ID=\"TMPGtime\"><Val>0000A041</Val><Type>4</Type></TPD>",
+        "<TPD ID=\"TMPGcode\"><Val>6</Val><Type>18</Type></TPD>",
+        "<TPD ID=\"TMPGdata\"><Val>0000A042</Val><Type>4</Type></TPD></TPLD>",
+        "<TPLD><TPD ID=\"TMPGtime\"><Val>0000A041</Val><Type>4</Type></TPD>",
+        "<TPD ID=\"TMPGcode\"><Val>7</Val><Type>18</Type></TPD>",
+        "<TPD ID=\"TMPGdata\"><Val>0000A041</Val><Type>4</Type></TPD></TPLD>",
+        "<TPLD><TPD ID=\"TMPGtime\"><Val>0000A041</Val><Type>4</Type></TPD>",
+        "<TPD ID=\"TMPGcode\"><Val>97</Val><Type>18</Type></TPD>",
+        "<TPD ID=\"TMPGdata\"><Val>00000000</Val><Type>4</Type></TPD></TPLD>",
+        "</TP>",
+        "<TP PgN=\"PUMP$PROG\">",
+        "<TPLD><TPD ID=\"Flow\"><Val>00002041</Val><Type>4</Type></TPD></TPLD>",
+        "</TP></GUD>"
+    );
+    let pda_xml = "<GUD><UPD ID=\"2DCH_Wavelength#1\"><Val>21000</Val><Type>3</Type></UPD></GUD>";
+
+    let cfg_u16 = encode_utf16le(config_xml);
+    let mth_u16 = encode_utf16le(method_xml);
+    let pda_u16 = encode_utf16le(pda_xml);
+
+    let lcm = build_compound_file(&[
+        ("File Property", prop),
+        ("GUMM_Information/ShimadzuLC.1/GUM.CONFIG", &cfg_u16),
+        ("GUMM_Information/ShimadzuLC.1/GUC.1.METHOD", &mth_u16),
+        ("GUMM_Information/ShimadzuPDA.1/PDA.1.METHOD", &pda_u16),
+    ]);
+
+    assert_eq!(
+        sequency_instruments::detect(Some("HPLC-95B.lcm"), &lcm),
+        VendorFormat::ShimadzuLcm
+    );
+    assert_eq!(
+        sequency_instruments::detect(None, &lcm),
+        VendorFormat::ShimadzuLcm
+    );
+    assert_eq!(
+        sequency_instruments::detect(Some("HPLC-95B.lcm"), &[]),
+        VendorFormat::ShimadzuLcm
+    );
+
+    let reading = sequency_instruments::read(Some("E:/methods/HPLC-95B.lcm"), &lcm).unwrap();
+    let direct = read_lcm(&lcm).unwrap();
+    assert_eq!(reading.method.name.as_deref(), Some("HPLC-95B.lcm"));
+    assert_eq!(direct.method.name, None);
+    assert_eq!(reading.technique, Technique::Hplc);
+    assert_eq!(reading.vendor_format, VendorFormat::ShimadzuLcm);
+    assert_eq!(reading.instrument.as_deref(), Some("Shimadzu CBM-20A"));
+    assert_eq!(reading.method.solvents, vec!["0.05%磷酸水溶液", "乙腈"]);
+    assert_eq!(reading.method.flow_rate_ml_min, Some(1.2));
+    assert_eq!(reading.method.column_temp_c, Some(50.0));
+    assert_eq!(reading.method.wavelength_nm, Some(210.0));
+    assert_eq!(
+        reading.method.gradient,
+        vec![
+            GradientStep {
+                time_min: 0.0,
+                b_pct: 0.0,
+                c_pct: 16.0,
+                d_pct: 84.0,
+            },
+            GradientStep {
+                time_min: 20.0,
+                b_pct: 0.0,
+                c_pct: 80.0,
+                d_pct: 20.0,
+            },
+        ]
+    );
+    assert_eq!(reading.method.gradient[0].a_pct(), 0.0);
+    assert_eq!(reading.method.gradient[1].a_pct(), 0.0);
+    assert!(reading.peaks.is_empty());
+    assert!(reading.traces.is_empty());
+
+    let word_doc = build_compound_file(&[("WordDocument", b"not a shimadzu method")]);
+    assert_eq!(
+        sequency_instruments::detect(None, &word_doc),
+        VendorFormat::Ole2
+    );
+    assert!(matches!(
+        read_lcm(&word_doc),
+        Err(InstrumentError::InvalidShimadzu(_))
+    ));
+
+    let run_prop = b"<?xml version=\"1.0\"?><SampleInfo><smpl_name>TBP-1</smpl_name></SampleInfo>";
+    let gumm_lcd = build_compound_file(&[
+        ("File Property", run_prop),
+        ("GUMM_Information/ShimadzuLC.1/GUC.1.METHOD", &mth_u16),
+    ]);
+    assert_eq!(
+        sequency_instruments::detect(None, &gumm_lcd),
+        VendorFormat::ShimadzuLcd
+    );
+
+    let prop_only = build_compound_file(&[("File Property", run_prop)]);
+    assert_eq!(
+        sequency_instruments::detect(None, &prop_only),
+        VendorFormat::ShimadzuLcd
+    );
+}
+
+#[test]
+fn shimadzu_read_run_includes_parsed_method_and_all_peaks() {
+    let prop = format!(
+        "<?xml version=\"1.0\"?><SampleInfo><smpl_name>{}</smpl_name><inj_vol>@FtoX@40400000</inj_vol></SampleInfo>",
+        stox_gb18030("TBP-230538")
+    );
+    let method_xml = concat!(
+        "<GUD>",
+        "<UPD ID=\"PumpA_Flow\"><Val>0000803F</Val><Type>4</Type></UPD>",
+        "<UPD ID=\"OVEN$use\"><Val>1</Val><Type>2</Type></UPD>",
+        "<UPD ID=\"OVEN$ovent\"><Val>0000F041</Val><Type>4</Type></UPD>",
+        "</GUD>"
+    );
+    let mth_u16 = encode_utf16le(method_xml);
+    let mut pt = b"VER1".to_vec();
+    pt.extend_from_slice(&2i32.to_le_bytes());
+    pt.extend_from_slice(&[0u8; 12]);
+    pt.extend_from_slice(&pack_peak_record(300_000, 1000.0, 200.0, 64));
+    pt.extend_from_slice(&pack_peak_record(600_000, 9000.0, 1800.0, 64));
+
+    let lcd = build_compound_file(&[
+        ("File Property", prop.as_bytes()),
+        ("GUMM_Information/ShimadzuLC.1/GUC.1.METHOD", &mth_u16),
+        ("LSS Data Processing/PT-PDA.1", &pt),
+    ]);
+
+    let run = read_run(&lcd).unwrap();
+    assert_eq!(run.peaks.len(), 2);
+    assert_eq!(run.method.flow_rate_ml_min, Some(1.0));
+    assert_eq!(run.method.column_temp_c, Some(30.0));
+    assert_eq!(run.method.injection_volume_ul, Some(3.0));
 }

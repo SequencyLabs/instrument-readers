@@ -50,6 +50,8 @@ impl fmt::Display for Technique {
 pub enum VendorFormat {
     /// Shimadzu LabSolutions `.lcd` OLE2 compound file.
     ShimadzuLcd,
+    /// Shimadzu LabSolutions `.lcm` OLE2 method file.
+    ShimadzuLcm,
     /// Bruker TopSpin NMR dataset (`acqus`, `procs`, `1r`).
     BrukerNmr,
     /// Agilent OpenLab CDS `.acaml` XML metadata file.
@@ -87,6 +89,7 @@ impl VendorFormat {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::ShimadzuLcd => "shimadzu_lcd",
+            Self::ShimadzuLcm => "shimadzu_lcm",
             Self::BrukerNmr => "bruker_nmr",
             Self::OpenLabAcaml => "openlab_acaml",
             Self::OpenLabDx => "openlab_dx",
@@ -109,6 +112,7 @@ impl VendorFormat {
     pub const fn default_technique(self) -> Technique {
         match self {
             Self::ShimadzuLcd
+            | Self::ShimadzuLcm
             | Self::OpenLabAcaml
             | Self::OpenLabDx
             | Self::OpenLabRx
@@ -155,6 +159,8 @@ impl GradientStep {
 pub struct InstrumentMethod {
     /// Method file name or identifier, if recorded.
     pub name: Option<String>,
+    /// Chromatographic column description, if recorded.
+    pub column: Option<String>,
     /// Mobile-phase solvent names (chromatography) or lock solvent (NMR).
     pub solvents: Vec<String>,
     /// Pump timetable steps for chromatographic gradients.

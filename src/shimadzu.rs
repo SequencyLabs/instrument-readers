@@ -1,4 +1,4 @@
-//! Shimadzu LabSolutions `.lcd` reader: properties, method/gradient, peak tables, and chromatograms.
+//! Shimadzu LabSolutions `.lcd` run and `.lcm` method reader: properties, method/gradient, peak tables, and chromatograms.
 
 use std::collections::BTreeMap;
 
@@ -25,6 +25,9 @@ const CHANNEL_STATUS: &str = "LSS Raw Data/Chromatogram Status";
 const GUM_CONFIG_STREAM: &str = "GUMM_Information/ShimadzuLC.1/GUM.CONFIG";
 const LC_METHOD_STREAM: &str = "GUMM_Information/ShimadzuLC.1/GUC.1.METHOD";
 const PDA_METHOD_STREAM: &str = "GUMM_Information/ShimadzuPDA.1/PDA.1.METHOD";
+const GUMM_PREFIX: &str = "GUMM_Information/";
+const METHOD_PROCESSING_PREFIX: &str = "LSS Data Processing-";
+const FILE_PROPERTY_STREAM: &str = "File Property";
 
 const TRACE_HEADER_LEN: usize = 24;
 const PEAK_RECORD_MIN_LEN: usize = 32;
@@ -44,14 +47,45 @@ pub struct ShimadzuRun {
     pub method_file: Option<String>,
     /// Instrument model label, such as `"Shimadzu CBM-20A"`.
     pub instrument: String,
+    /// Parsed acquisition method parameters embedded in the `.lcd` file.
+    pub method: InstrumentMethod,
     /// Peaks from Ch1 (or the first available `PT-*` table).
     pub peaks: Vec<Peak>,
+}
+
+/// Classifies an already-parsed OLE2 container as a Shimadzu `.lcd` run or `.lcm` method file.
+#[must_use]
+pub fn classify(ole: &OleFile<'_>) -> Option<VendorFormat> {
+    let is_run_stream = |path: &str| {
+        path.starts_with("LSS Raw Data/")
+            || path.starts_with("PDA 3D Raw Data/")
+            || path.starts_with(&format!("{PROCESSED_STORAGE}/"))
+            || path.starts_with(&format!("{ORIGINAL_STORAGE}/"))
+    };
+    if ole.stream_names().any(is_run_stream) {
+        return Some(VendorFormat::ShimadzuLcd);
+    }
+    if ole
+        .stream_names()
+        .any(|p| p.starts_with(GUMM_PREFIX) || p.starts_with(METHOD_PROCESSING_PREFIX))
+    {
+        let props = read_optional_properties(ole);
+        return Some(
+            if props.contains_key("smpl_name") || props.contains_key("datafile") {
+                VendorFormat::ShimadzuLcd
+            } else {
+                VendorFormat::ShimadzuLcm
+            },
+        );
+    }
+    ole.stream(FILE_PROPERTY_STREAM)
+        .map(|_| VendorFormat::ShimadzuLcd)
 }
 
 /// Parses a Shimadzu `.lcd` compound file into a [`ShimadzuRun`] summary.
 pub fn read_run(data: &[u8]) -> Result<ShimadzuRun> {
     let ole = OleFile::parse(data)?;
-    let prop_bytes = ole.require_stream("File Property")?;
+    let prop_bytes = ole.require_stream(FILE_PROPERTY_STREAM)?;
     let props = parse_properties(&prop_bytes);
     let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_owned());
     Ok(ShimadzuRun {
@@ -65,7 +99,34 @@ pub fn read_run(data: &[u8]) -> Result<ShimadzuRun> {
             .get("methodfile")
             .and_then(|s| non_empty(file_name(s))),
         instrument: parse_instrument(&ole),
+        method: parse_method(&ole, &props),
         peaks: read_best_peaks(&ole),
+    })
+}
+
+/// Parses a Shimadzu `.lcm` method file into a unified [`InstrumentReading`].
+pub fn read_lcm(data: &[u8]) -> Result<InstrumentReading> {
+    let ole = OleFile::parse(data)?;
+    read_lcm_ole(&ole)
+}
+
+/// Parses a Shimadzu `.lcm` method file from an already-opened [`OleFile`].
+pub fn read_lcm_ole(ole: &OleFile<'_>) -> Result<InstrumentReading> {
+    if !ole.stream_names().any(|p| p.starts_with(GUMM_PREFIX)) {
+        return Err(InstrumentError::InvalidShimadzu(
+            "OLE2 container has no Shimadzu GUMM_Information method streams".to_owned(),
+        ));
+    }
+    let props = read_optional_properties(ole);
+    Ok(InstrumentReading {
+        technique: Technique::Hplc,
+        vendor_format: VendorFormat::ShimadzuLcm,
+        acquired_at: None,
+        sample_name: None,
+        instrument: Some(parse_instrument(ole)),
+        method: parse_method(ole, &props),
+        peaks: Vec::new(),
+        traces: Vec::new(),
     })
 }
 
@@ -77,10 +138,7 @@ pub fn read_lcd(data: &[u8]) -> Result<InstrumentReading> {
 
 /// Parses a Shimadzu `.lcd` from an already-opened [`OleFile`].
 pub fn read_lcd_ole(ole: &OleFile<'_>) -> Result<InstrumentReading> {
-    let props = match ole.stream("File Property") {
-        Some(bytes) => parse_properties(&bytes),
-        None => BTreeMap::new(),
-    };
+    let props = read_optional_properties(ole);
 
     let acquired_at = parse_filetime(
         props.get("dwLowDateTime").map(String::as_str),
@@ -91,20 +149,9 @@ pub fn read_lcd_ole(ole: &OleFile<'_>) -> Result<InstrumentReading> {
         .map(|s| s.trim())
         .filter(|s| !s.is_empty() && !is_masked(s))
         .map(ToOwned::to_owned);
-    let method_name = props
-        .get("methodfile")
-        .map(|s| file_name(s))
-        .filter(|s| !s.is_empty() && !is_masked(s))
-        .map(ToOwned::to_owned);
-    let injection_volume_ul = props.get("inj_vol").and_then(|v| parse_inj_vol(v));
 
     let instrument = Some(parse_instrument(ole));
-    let mut method = parse_method(ole);
-    method.name = method_name;
-    if method.injection_volume_ul.is_none() {
-        method.injection_volume_ul = injection_volume_ul;
-    }
-
+    let method = parse_method(ole, &props);
     let peaks = read_best_peaks(ole);
     let traces = chromatograms_ole(ole)?;
 
@@ -118,6 +165,12 @@ pub fn read_lcd_ole(ole: &OleFile<'_>) -> Result<InstrumentReading> {
         peaks,
         traces,
     })
+}
+
+fn read_optional_properties(ole: &OleFile<'_>) -> BTreeMap<String, String> {
+    ole.stream(FILE_PROPERTY_STREAM)
+        .map(|bytes| parse_properties(&bytes))
+        .unwrap_or_default()
 }
 
 /// Extracts key-value XML leaf fields from a Shimadzu `File Property` stream.
@@ -492,7 +545,7 @@ fn parse_instrument(ole: &OleFile<'_>) -> String {
     "Shimadzu".to_owned()
 }
 
-fn parse_method(ole: &OleFile<'_>) -> InstrumentMethod {
+fn parse_method(ole: &OleFile<'_>, props: &BTreeMap<String, String>) -> InstrumentMethod {
     let mut method = InstrumentMethod::default();
 
     if let Some(lc_bytes) = ole.stream(LC_METHOD_STREAM) {
@@ -511,12 +564,15 @@ fn parse_method(ole: &OleFile<'_>) -> InstrumentMethod {
             }
         }
 
-        method.flow_rate_ml_min = get_upd_float(&lc.params, "PumpA_Flow")
-            .or_else(|| get_upd_float(&lc.params, "LPGE$tflow"))
-            .or_else(|| get_upd_float(&lc.params, "Flow"));
+        method.flow_rate_ml_min = ["PumpA_Flow", "LPGE$tflow", "ISO$aflow", "Flow"]
+            .into_iter()
+            .find_map(|key| get_upd_float(&lc.params, key).filter(|&f| f > 0.0))
+            .map(|f| round_digits(f, 4));
 
         if get_upd_float(&lc.params, "OVEN$use").is_none_or(|u| u > 0.0) {
-            method.column_temp_c = get_upd_float(&lc.params, "OVEN$ovent");
+            method.column_temp_c = get_upd_float(&lc.params, "OVEN$ovent")
+                .filter(|&t| t > 0.0)
+                .map(|t| round_digits(t, 4));
         }
 
         method.wavelength_nm = find_wavelength(&lc.params);
@@ -536,6 +592,15 @@ fn parse_method(ole: &OleFile<'_>) -> InstrumentMethod {
         if let Some(wl) = find_wavelength(&pda.params) {
             method.wavelength_nm = Some(wl);
         }
+    }
+
+    method.name = props
+        .get("methodfile")
+        .map(|s| file_name(s))
+        .filter(|s| !s.is_empty() && !is_masked(s))
+        .map(ToOwned::to_owned);
+    if method.injection_volume_ul.is_none() {
+        method.injection_volume_ul = props.get("inj_vol").and_then(|v| parse_inj_vol(v));
     }
 
     method
@@ -589,7 +654,7 @@ fn parse_gumm_xml(xml: &str) -> GummData {
                     in_tpld = true;
                     cur_event = TimeProgEvent::default();
                 }
-                "UPD" => {
+                "UPD" | "TPD" => {
                     cur_upd = Some(UpdEntry {
                         id: xml_attr(&e, "ID").unwrap_or_default(),
                         val: String::new(),
@@ -627,7 +692,7 @@ fn parse_gumm_xml(xml: &str) -> GummData {
                     out.model_name = Some(std::mem::take(&mut model_buf));
                 }
                 "Val" | "Type" => cur_field = None,
-                "UPD" => {
+                "UPD" | "TPD" => {
                     if let Some(upd) = cur_upd.take() {
                         if in_tpld {
                             record_tpld_upd(&upd, &mut cur_event);

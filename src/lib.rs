@@ -1,7 +1,7 @@
 //! Pure-Rust binary instrument file readers for analytical chemistry formats.
 //!
 //! Provides unified metadata, method/gradient, peak-table, and trace extraction for:
-//! - Shimadzu LabSolutions `.lcd` (OLE2 Compound File Binary Format)
+//! - Shimadzu LabSolutions `.lcd` run files and `.lcm` method files (OLE2 Compound File Binary Format)
 //! - Bruker TopSpin NMR (`acqus`, `procs`, and `1r` binary real spectra)
 //! - Agilent OpenLab CDS (`.acaml` XML metadata and zipped `.dx`/`.rx` containers)
 //! - Automatic format detection by filename and magic bytes, plus LTTB and min-max bin downsampling.

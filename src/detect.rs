@@ -24,15 +24,7 @@ pub fn detect(filename: Option<&str>, data: &[u8]) -> VendorFormat {
 
 fn detect_by_magic(base_lower: &str, data: &[u8]) -> Option<VendorFormat> {
     if data.starts_with(&OLE_MAGIC) {
-        if base_lower.ends_with(".lcd") {
-            return Some(VendorFormat::ShimadzuLcd);
-        }
-        if let Ok(ole) = OleFile::parse(data)
-            && ole.stream_names().any(is_shimadzu_stream)
-        {
-            return Some(VendorFormat::ShimadzuLcd);
-        }
-        return Some(VendorFormat::Ole2);
+        return Some(detect_ole2(base_lower, data));
     }
 
     if data.starts_with(&ZIP_LOCAL_MAGIC) || data.starts_with(&ZIP_EOCD_MAGIC) {
@@ -111,6 +103,9 @@ fn detect_by_filename(full_path: &str, base_lower: &str) -> VendorFormat {
     if base_lower.ends_with(".lcd") {
         return VendorFormat::ShimadzuLcd;
     }
+    if base_lower.ends_with(".lcm") {
+        return VendorFormat::ShimadzuLcm;
+    }
     if base_lower.ends_with(".acaml") {
         return VendorFormat::OpenLabAcaml;
     }
@@ -160,12 +155,17 @@ fn detect_by_filename(full_path: &str, base_lower: &str) -> VendorFormat {
     VendorFormat::Unknown
 }
 
-fn is_shimadzu_stream(path: &str) -> bool {
-    path == "File Property"
-        || path.starts_with("LSS Raw Data/")
-        || path.starts_with("LSS Data Processing")
-        || path.starts_with("PDA 3D Raw Data/")
-        || path.starts_with("GUMM_Information/")
+fn detect_ole2(base_lower: &str, data: &[u8]) -> VendorFormat {
+    if base_lower.ends_with(".lcm") {
+        return VendorFormat::ShimadzuLcm;
+    }
+    if base_lower.ends_with(".lcd") {
+        return VendorFormat::ShimadzuLcd;
+    }
+    OleFile::parse(data)
+        .ok()
+        .and_then(|ole| shimadzu::classify(&ole))
+        .unwrap_or(VendorFormat::Ole2)
 }
 
 fn looks_like_jcamp(trimmed: &str) -> bool {
@@ -183,6 +183,16 @@ pub fn read(filename: Option<&str>, data: &[u8]) -> Result<InstrumentReading> {
     let format = detect(filename, data);
     match format {
         VendorFormat::ShimadzuLcd => shimadzu::read_lcd(data),
+        VendorFormat::ShimadzuLcm => {
+            let mut reading = shimadzu::read_lcm(data)?;
+            if reading.method.name.is_none() {
+                reading.method.name = filename
+                    .map(file_name)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned);
+            }
+            Ok(reading)
+        }
         VendorFormat::OpenLabAcaml => openlab::read_acaml(data),
         VendorFormat::OpenLabDx => openlab::read_dx(data),
         VendorFormat::OpenLabRx => openlab::read_rx(data),

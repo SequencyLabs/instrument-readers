@@ -54,6 +54,7 @@ impl From<RustGradientStep> for GradientStep {
 #[derive(Clone)]
 pub struct InstrumentMethod {
     pub name: Option<String>,
+    pub column: Option<String>,
     pub solvents: Vec<String>,
     pub gradient: Vec<GradientStep>,
     pub flow_rate_ml_min: Option<f64>,
@@ -71,6 +72,7 @@ impl From<RustInstrumentMethod> for InstrumentMethod {
     fn from(method: RustInstrumentMethod) -> Self {
         Self {
             name: method.name,
+            column: method.column,
             solvents: method.solvents,
             gradient: method.gradient.into_iter().map(Into::into).collect(),
             flow_rate_ml_min: method.flow_rate_ml_min,
@@ -358,6 +360,12 @@ fn shimadzu_read(data: &[u8]) -> PyResult<InstrumentReading> {
     py_result(shimadzu::read_lcd(data)).map(Into::into)
 }
 
+/// Parses a Shimadzu `.lcm` method file into a unified `InstrumentReading`.
+#[pyfunction]
+fn shimadzu_read_lcm(data: &[u8]) -> PyResult<InstrumentReading> {
+    py_result(shimadzu::read_lcm(data)).map(Into::into)
+}
+
 /// Parses a Shimadzu `File Property` stream into key-value pairs.
 #[pyfunction]
 fn shimadzu_properties(stream: &[u8]) -> BTreeMap<String, String> {
@@ -481,6 +489,7 @@ fn sequency_instruments_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ole_layout, m)?)?;
     m.add_function(wrap_pyfunction!(ole_place, m)?)?;
     m.add_function(wrap_pyfunction!(shimadzu_read, m)?)?;
+    m.add_function(wrap_pyfunction!(shimadzu_read_lcm, m)?)?;
     m.add_function(wrap_pyfunction!(shimadzu_properties, m)?)?;
     m.add_function(wrap_pyfunction!(shimadzu_filetime, m)?)?;
     m.add_function(wrap_pyfunction!(shimadzu_peak_table, m)?)?;
