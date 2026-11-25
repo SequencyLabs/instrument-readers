@@ -2,16 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use quick_xml::Reader;
-use quick_xml::events::{BytesStart, Event};
+use roxmltree::Node;
 use serde::{Deserialize, Serialize};
 
-use crate::binary::{
-    append_xml_ref, decode_text_auto, file_name, round_digits, xml_attr, xml_local_name,
-};
+use crate::binary::{decode_text_auto, file_name, round_digits};
 use crate::chemstation::parse_chemstation_ch;
 use crate::error::{InstrumentError, Result};
 use crate::types::{InstrumentMethod, InstrumentReading, Peak, Technique, Trace, VendorFormat};
+use crate::xml::{elements, parse_xml, text_content, trimmed_text};
 use crate::zip_archive::{ZipArchive, ZipEntryInfo};
 
 const NO_TIME_PREFIX: &str = "1601-01-01";
@@ -81,101 +79,52 @@ pub struct DxInspection {
     pub traces: Vec<Trace>,
 }
 
-#[derive(Default)]
-struct MeasDataRow {
-    status: Option<String>,
-    result_file: Option<String>,
-}
-
 /// Parses an Agilent OpenLab `.acaml` XML document, matching `sequency_lab_data.instruments.openlab.result_set`.
 pub fn parse_acaml(data: &[u8]) -> Result<AcamlResultSet> {
     let text = decode_text_auto(data);
-    let mut reader = Reader::from_str(&text);
-    reader.config_mut().trim_text(false);
-
-    let mut saw_acaml_root = false;
-    let mut stack: Vec<String> = Vec::new();
-    let mut current_meas_id: Option<String> = None;
-    let mut measured: BTreeMap<String, MeasDataRow> = BTreeMap::new();
-    let mut raw_rows: Vec<OpenLabInjection> = Vec::new();
-    let mut logins: BTreeSet<String> = BTreeSet::new();
-    let mut text_buf = String::new();
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(e)) => {
-                let name = xml_local_name(e.local_name());
-                if name == "ACAML" {
-                    saw_acaml_root = true;
-                } else if name == "MeasData" {
-                    current_meas_id = xml_attr(&e, "id");
-                    if let Some(id) = current_meas_id.as_ref() {
-                        measured.entry(id.clone()).or_default();
-                    }
-                } else if name == "InjectionMetaData" {
-                    raw_rows.push(parse_injection_meta_attrs(&e));
-                }
-                text_buf.clear();
-                stack.push(name);
-            }
-            Ok(Event::Empty(e)) => {
-                let name = xml_local_name(e.local_name());
-                if name == "ACAML" {
-                    saw_acaml_root = true;
-                } else if name == "InjectionMetaData" {
-                    raw_rows.push(parse_injection_meta_attrs(&e));
-                }
-            }
-            Ok(Event::Text(t)) => {
-                text_buf.push_str(&t);
-            }
-            Ok(Event::GeneralRef(r)) => append_xml_ref(&mut text_buf, &r),
-            Ok(Event::End(e)) => {
-                let name = xml_local_name(e.local_name());
-                let trimmed = text_buf.trim();
-                if matches!(name.as_str(), "Username" | "CreatedByUser") {
-                    logins.insert(trimmed.to_owned());
-                }
-                if let Some(id) = current_meas_id.as_ref()
-                    && let Some(row) = measured.get_mut(id)
-                {
-                    if name == "Status" && parent_is_acq_status(&stack) && !trimmed.is_empty() {
-                        row.status = Some(trimmed.to_owned());
-                    } else if name == "ExternalResultPath" && !trimmed.is_empty() {
-                        row.result_file = Some(trimmed.to_owned());
-                    }
-                }
-                if name == "MeasData" {
-                    current_meas_id = None;
-                }
-                text_buf.clear();
-                stack.pop();
-            }
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(err) => return Err(InstrumentError::Xml(err.to_string())),
-        }
-    }
-
-    if !saw_acaml_root {
+    let doc = parse_xml(&text).map_err(|err| InstrumentError::Xml(err.to_string()))?;
+    if doc.root_element().tag_name().name() != "ACAML" {
         return Err(InstrumentError::InvalidOpenLab(
             "XML document has no ACAML root element".to_owned(),
         ));
     }
 
-    for inj in &mut raw_rows {
-        if let Some(id) = inj.id.as_ref()
-            && let Some(m) = measured.get(id)
+    let mut measured: BTreeMap<&str, (Option<String>, Option<String>)> = BTreeMap::new();
+    for meas in elements(doc.root(), "MeasData") {
+        let Some(id) = meas.attribute("id") else {
+            continue;
+        };
+        let entry = measured.entry(id).or_default();
+        if let Some(status) = elements(meas, "Status")
+            .filter(|n| {
+                n.parent().is_some_and(|p| {
+                    matches!(p.tag_name().name(), "AcquitionStatus" | "AcquisitionStatus")
+                })
+            })
+            .filter_map(trimmed_text)
+            .next_back()
         {
-            inj.status.clone_from(&m.status);
-            inj.result_file.clone_from(&m.result_file);
+            entry.0 = Some(status);
+        }
+        if let Some(result_file) = elements(meas, "ExternalResultPath")
+            .filter_map(trimmed_text)
+            .next_back()
+        {
+            entry.1 = Some(result_file);
         }
     }
 
-    Ok(AcamlResultSet {
-        injections: raw_rows,
-        logins,
-    })
+    let injections = elements(doc.root(), "InjectionMetaData")
+        .map(|n| parse_injection_meta(n, &measured))
+        .collect();
+
+    let logins = doc
+        .descendants()
+        .filter(|n| n.is_element() && matches!(n.tag_name().name(), "Username" | "CreatedByUser"))
+        .map(|n| text_content(n).trim().to_owned())
+        .collect();
+
+    Ok(AcamlResultSet { injections, logins })
 }
 
 /// Inspects an OpenLab `.rx` ZIP container and extracts peaks from `Base/InjectionACAML`.
@@ -224,18 +173,10 @@ pub fn inspect_dx(data: &[u8]) -> Result<DxInspection> {
         if let Some(ch_bytes) = archive.read_by_name(&member)?
             && let Some(parsed) = parse_chemstation_ch(&ch_bytes)
         {
-            if sample_name.is_none() {
-                sample_name = parsed.sample_name;
-            }
-            if method_name.is_none() {
-                method_name = parsed.method_name;
-            }
-            if instrument.is_none() {
-                instrument = parsed.instrument;
-            }
-            if wavelength_nm.is_none() {
-                wavelength_nm = parsed.wavelength_nm;
-            }
+            sample_name = sample_name.or(parsed.sample_name);
+            method_name = method_name.or(parsed.method_name);
+            instrument = instrument.or(parsed.instrument);
+            wavelength_nm = wavelength_nm.or(parsed.wavelength_nm);
             traces.push(parsed.trace);
         }
     }
@@ -364,18 +305,10 @@ pub fn read_bundle(files: &[(&str, &[u8])]) -> Result<InstrumentReading> {
         .collect();
     if dx_candidates.len() == 1 {
         let dx = inspect_dx(dx_candidates[0].1)?;
-        if reading.sample_name.is_none() {
-            reading.sample_name = dx.sample_name;
-        }
-        if reading.instrument.is_none() {
-            reading.instrument = dx.instrument;
-        }
-        if reading.method.name.is_none() {
-            reading.method.name = dx.method_name;
-        }
-        if reading.method.wavelength_nm.is_none() {
-            reading.method.wavelength_nm = dx.wavelength_nm;
-        }
+        reading.sample_name = reading.sample_name.or(dx.sample_name);
+        reading.instrument = reading.instrument.or(dx.instrument);
+        reading.method.name = reading.method.name.or(dx.method_name);
+        reading.method.wavelength_nm = reading.method.wavelength_nm.or(dx.wavelength_nm);
         reading.traces = dx.traces;
     }
 
@@ -411,217 +344,119 @@ fn infer_openlab_technique(instrument: Option<&str>, method: Option<&str>) -> Op
     None
 }
 
-fn parse_injection_meta_attrs(e: &BytesStart<'_>) -> OpenLabInjection {
-    let raw_data_file = xml_attr(e, "RawDataFileName").unwrap_or_default();
-    let data_file = strip_suffix_ignore_case(&raw_data_file, ".dx").to_owned();
-    let sample_name = xml_attr(e, "SampleName")
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default();
-    let sample_type = xml_attr(e, "SampleType").unwrap_or_default();
-    let vial = xml_attr(e, "VialNumber").unwrap_or_default();
-    let instrument = xml_attr(e, "InstrumentName").filter(|s| !s.is_empty());
-    let acquired_utc = xml_attr(e, "InjectionAcqDateTime")
-        .filter(|at| !at.is_empty() && !at.starts_with(NO_TIME_PREFIX));
-    let method = xml_attr(e, "AcqMethodName").unwrap_or_default();
-    let processing_method = xml_attr(e, "DaMethodName").filter(|s| !s.is_empty());
-    let injection_volume_ul = xml_attr(e, "InjectionVolume")
-        .or_else(|| xml_attr(e, "InjVolume"))
+fn parse_injection_meta(
+    node: Node<'_, '_>,
+    measured: &BTreeMap<&str, (Option<String>, Option<String>)>,
+) -> OpenLabInjection {
+    let id = node.attribute("InjectionId");
+    let (status, result_file) = id
+        .and_then(|id| measured.get(id))
+        .cloned()
+        .unwrap_or((None, None));
+    let raw_data_file = node.attribute("RawDataFileName").unwrap_or("");
+    let injection_volume_ul = node
+        .attribute("InjectionVolume")
+        .or_else(|| node.attribute("InjVolume"))
         .and_then(|v| v.parse::<f64>().ok())
         .filter(|v| v.is_finite() && *v >= 0.0);
 
     OpenLabInjection {
-        id: xml_attr(e, "InjectionId"),
-        data_file,
-        sample_name,
-        sample_type,
-        vial,
-        instrument,
-        acquired_utc,
-        method,
-        processing_method,
-        status: None,
-        result_file: None,
+        id: id.map(ToOwned::to_owned),
+        data_file: strip_suffix_ignore_case(raw_data_file, ".dx").to_owned(),
+        sample_name: node
+            .attribute("SampleName")
+            .map(str::trim)
+            .unwrap_or("")
+            .to_owned(),
+        sample_type: node.attribute("SampleType").unwrap_or("").to_owned(),
+        vial: node.attribute("VialNumber").unwrap_or("").to_owned(),
+        instrument: node
+            .attribute("InstrumentName")
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
+        acquired_utc: node
+            .attribute("InjectionAcqDateTime")
+            .filter(|at| !at.is_empty() && !at.starts_with(NO_TIME_PREFIX))
+            .map(ToOwned::to_owned),
+        method: node.attribute("AcqMethodName").unwrap_or("").to_owned(),
+        processing_method: node
+            .attribute("DaMethodName")
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned),
+        status,
+        result_file,
         injection_volume_ul,
     }
 }
 
 fn parse_injection_acaml_peaks(data: &[u8]) -> Result<Vec<Peak>> {
     let text = decode_text_auto(data);
-    let mut reader = Reader::from_str(&text);
-    reader.config_mut().trim_text(false);
+    let doc = parse_xml(&text).map_err(|err| InstrumentError::Xml(err.to_string()))?;
 
-    let mut in_compound = false;
-    let mut compound_name = String::new();
-    let mut compound_peak_ids: Vec<String> = Vec::new();
-    let mut named_peaks: BTreeMap<String, String> = BTreeMap::new();
-
-    let mut current_peak_id: Option<String> = None;
-    let mut current_peak: Option<Peak> = None;
-    let mut peaks: Vec<(Option<String>, Peak)> = Vec::new();
-    let mut text_buf = String::new();
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(e)) => {
-                let name = xml_local_name(e.local_name());
-                match name.as_str() {
-                    "InjectionCompound" => {
-                        in_compound = true;
-                        compound_name.clear();
-                        compound_peak_ids.clear();
-                    }
-                    "Peak_ID" if in_compound => {
-                        if let Some(id) = xml_attr(&e, "id") {
-                            compound_peak_ids.push(id);
-                        }
-                    }
-                    "Peak" => {
-                        current_peak_id = xml_attr(&e, "id");
-                        current_peak = Some(Peak {
-                            rt_min: None,
-                            area: None,
-                            area_pct: None,
-                            height: None,
-                            compound: None,
-                        });
-                    }
-                    _ => {
-                        if let Some(peak) = current_peak.as_mut() {
-                            record_peak_val_attr(&name, &e, peak);
-                        }
-                    }
-                }
-                text_buf.clear();
+    let mut named_peaks: BTreeMap<&str, String> = BTreeMap::new();
+    for compound in elements(doc.root(), "InjectionCompound") {
+        let Some(name) = elements(compound, "CompoundName")
+            .filter_map(trimmed_text)
+            .next_back()
+        else {
+            continue;
+        };
+        for pid in elements(compound, "Peak_ID") {
+            if let Some(id) = pid.attribute("id") {
+                named_peaks.insert(id, name.clone());
             }
-            Ok(Event::Empty(e)) => {
-                let name = xml_local_name(e.local_name());
-                if name == "Peak_ID" && in_compound {
-                    if let Some(id) = xml_attr(&e, "id") {
-                        compound_peak_ids.push(id);
-                    }
-                } else if let Some(peak) = current_peak.as_mut() {
-                    record_peak_val_attr(&name, &e, peak);
-                }
-            }
-            Ok(Event::Text(t)) => {
-                text_buf.push_str(&t);
-            }
-            Ok(Event::GeneralRef(r)) => append_xml_ref(&mut text_buf, &r),
-            Ok(Event::End(e)) => {
-                let name = xml_local_name(e.local_name());
-                match name.as_str() {
-                    "CompoundName" if in_compound => {
-                        compound_name = text_buf.trim().to_owned();
-                    }
-                    "InjectionCompound" => {
-                        in_compound = false;
-                        if !compound_name.is_empty() {
-                            for pid in compound_peak_ids.drain(..) {
-                                named_peaks.insert(pid, compound_name.clone());
-                            }
-                        }
-                    }
-                    "Peak" => {
-                        if let Some(peak) = current_peak.take() {
-                            peaks.push((current_peak_id.take(), peak));
-                        }
-                    }
-                    _ => {}
-                }
-                text_buf.clear();
-            }
-            Ok(Event::Eof) => break,
-            Ok(_) => {}
-            Err(err) => return Err(InstrumentError::Xml(err.to_string())),
         }
     }
 
-    let mut resolved: Vec<Peak> = peaks
-        .into_iter()
-        .map(|(pid, mut peak)| {
-            if let Some(id) = pid {
-                peak.compound = named_peaks.get(&id).cloned();
+    let mut peaks: Vec<Peak> = elements(doc.root(), "Peak")
+        .filter_map(|node| {
+            let rt_min = peak_val(node, "RetentionTime", 3);
+            let area = peak_val(node, "Area", 3);
+            let area_pct = peak_val(node, "AreaPercent", 2);
+            let height = peak_val(node, "Height", 3);
+            if rt_min.is_none() && area.is_none() && area_pct.is_none() && height.is_none() {
+                return None;
             }
-            peak
+            Some(Peak {
+                rt_min,
+                area,
+                area_pct,
+                height,
+                compound: node
+                    .attribute("id")
+                    .and_then(|id| named_peaks.get(id))
+                    .cloned(),
+            })
         })
         .collect();
 
-    resolved.sort_by(|a, b| match (a.rt_min, b.rt_min) {
+    peaks.sort_by(|a, b| match (a.rt_min, b.rt_min) {
         (Some(ra), Some(rb)) => ra.total_cmp(&rb),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
         (None, None) => std::cmp::Ordering::Equal,
     });
-    Ok(resolved)
+    Ok(peaks)
 }
 
-fn record_peak_val_attr(tag: &str, e: &BytesStart<'_>, peak: &mut Peak) {
-    let Some(raw) = xml_attr(e, "val") else {
-        return;
-    };
-    let Ok(val) = raw.parse::<f64>() else {
-        return;
-    };
-    if !val.is_finite() {
-        return;
-    }
-    match tag {
-        "RetentionTime" => peak.rt_min = Some(round_digits(val, 3)),
-        "Area" => peak.area = Some(round_digits(val, 3)),
-        "AreaPercent" => peak.area_pct = Some(round_digits(val, 2)),
-        "Height" => peak.height = Some(round_digits(val, 3)),
-        _ => {}
-    }
+fn peak_val(peak: Node<'_, '_>, tag: &str, decimals: i32) -> Option<f64> {
+    elements(peak, tag)
+        .filter_map(|n| n.attribute("val")?.parse::<f64>().ok())
+        .rfind(|v| v.is_finite())
+        .map(|v| round_digits(v, decimals))
 }
 
 fn parse_acmd_metadata(data: &[u8]) -> (Option<String>, Option<String>) {
     let text = decode_text_auto(data);
-    let mut reader = Reader::from_str(&text);
-    let mut sample = None;
-    let mut method = None;
-    let mut current: Option<String> = None;
-    let mut buf = String::new();
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(e)) => {
-                current = Some(xml_local_name(e.local_name()));
-                buf.clear();
-            }
-            Ok(Event::Text(t)) => {
-                buf.push_str(&t);
-            }
-            Ok(Event::GeneralRef(r)) => append_xml_ref(&mut buf, &r),
-            Ok(Event::End(e)) => {
-                let name = xml_local_name(e.local_name());
-                let trimmed = buf.trim();
-                if current.as_deref() == Some(name.as_str()) && !trimmed.is_empty() {
-                    if name == "SampleName" && sample.is_none() {
-                        sample = Some(trimmed.to_owned());
-                    } else if name == "AcquisitionMethod" && method.is_none() {
-                        let m = file_name(trimmed);
-                        if !m.is_empty() {
-                            method = Some(m.to_owned());
-                        }
-                    }
-                }
-                current = None;
-                buf.clear();
-            }
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
-        }
-    }
-
+    let Ok(doc) = parse_xml(&text) else {
+        return (None, None);
+    };
+    let sample = elements(doc.root(), "SampleName").find_map(trimmed_text);
+    let method = elements(doc.root(), "AcquisitionMethod")
+        .find_map(trimmed_text)
+        .map(|s| file_name(&s).to_owned())
+        .filter(|m| !m.is_empty());
     (sample, method)
-}
-
-fn parent_is_acq_status(stack: &[String]) -> bool {
-    stack
-        .len()
-        .checked_sub(2)
-        .and_then(|idx| stack.get(idx))
-        .is_some_and(|p| p == "AcquitionStatus" || p == "AcquisitionStatus")
 }
 
 fn strip_suffix_ignore_case<'a>(s: &'a str, suffix: &str) -> &'a str {
@@ -637,14 +472,64 @@ fn strip_suffix_ignore_case<'a>(s: &'a str, suffix: &str) -> &'a str {
 }
 
 fn has_ext_ignore_case(path: &str, ext: &str) -> bool {
-    let start = path.len().saturating_sub(ext.len());
-    path.len() >= ext.len()
-        && path.is_char_boundary(start)
-        && path[start..].eq_ignore_ascii_case(ext)
+    strip_suffix_ignore_case(path, ext).len() != path.len()
 }
 
 fn starts_with_ignore_case(s: &str, prefix: &str) -> bool {
     s.len() >= prefix.len()
         && s.is_char_boundary(prefix.len())
         && s[..prefix.len()].eq_ignore_ascii_case(prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_acaml_merges_duplicate_meas_data_and_joins_split_text() {
+        let xml = b"  \n<?xml version=\"1.0\" encoding=\"utf-8\"?>
+<ACAML>
+  <Doc>
+    <Username>ab<!--comment-->cd</Username>
+    <MeasData id=\"inj-1\">
+      <AcquisitionStatus><Status>Completed</Status></AcquisitionStatus>
+    </MeasData>
+    <MeasData id=\"inj-1\">
+      <ExternalResultPath>results/run1.rx</ExternalResultPath>
+    </MeasData>
+    <InjectionMetaData InjectionId=\"inj-1\" RawDataFileName=\"run1.dx\" SampleName=\"S1\" SampleType=\"Sample\" VialNumber=\"1\" AcqMethodName=\"M1\"/>
+  </Doc>
+</ACAML>\0\0";
+
+        let rs = parse_acaml(xml).unwrap();
+        assert!(rs.logins.contains("abcd"));
+        assert_eq!(rs.injections.len(), 1);
+        assert_eq!(rs.injections[0].status.as_deref(), Some("Completed"));
+        assert_eq!(
+            rs.injections[0].result_file.as_deref(),
+            Some("results/run1.rx")
+        );
+    }
+
+    #[test]
+    fn parse_injection_acaml_peaks_skips_empty_peak() {
+        let xml = b"<ACAML>
+  <InjectionCompound>
+    <CompoundName>Caffeine</CompoundName>
+    <Peak_ID id=\"p1\"/>
+    <Peak_ID id=\"p2\"/>
+  </InjectionCompound>
+  <Peak id=\"p1\"/>
+  <Peak id=\"p2\">
+    <RetentionTime val=\"2.3456\"/>
+    <Area val=\"100.5\"/>
+  </Peak>
+</ACAML>";
+
+        let peaks = parse_injection_acaml_peaks(xml).unwrap();
+        assert_eq!(peaks.len(), 1);
+        assert_eq!(peaks[0].rt_min, Some(2.346));
+        assert_eq!(peaks[0].area, Some(100.5));
+        assert_eq!(peaks[0].compound.as_deref(), Some("Caffeine"));
+    }
 }

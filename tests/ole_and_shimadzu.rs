@@ -648,6 +648,7 @@ fn shimadzu_cleaned_files_drop_masked_names_and_decode_cbm20a_lpge_gradients() {
     );
     let reading = read_lcd(&lcd).unwrap();
     assert_eq!(reading.sample_name, None);
+    assert_eq!(read_run(&lcd).unwrap().sample_name, None);
     assert!(reading.method.solvents.is_empty());
     assert_eq!(reading.method.flow_rate_ml_min, Some(0.5));
     assert_eq!(
@@ -900,7 +901,7 @@ fn shimadzu_lcm_method_file_detects_and_parses_method_fields() {
 fn shimadzu_read_run_includes_parsed_method_and_all_peaks() {
     let prop = format!(
         "<?xml version=\"1.0\"?><SampleInfo><smpl_name>{}</smpl_name><inj_vol>@FtoX@40400000</inj_vol></SampleInfo>",
-        stox_gb18030("TBP-230538")
+        stox_gb18030(" TBP-230538 ")
     );
     let method_xml = concat!(
         "<GUD>",
@@ -923,6 +924,7 @@ fn shimadzu_read_run_includes_parsed_method_and_all_peaks() {
     ]);
 
     let run = read_run(&lcd).unwrap();
+    assert_eq!(run.sample_name.as_deref(), Some("TBP-230538"));
     assert_eq!(run.peaks.len(), 2);
     assert_eq!(run.method.flow_rate_ml_min, Some(1.0));
     assert_eq!(run.method.column_temp_c, Some(30.0));

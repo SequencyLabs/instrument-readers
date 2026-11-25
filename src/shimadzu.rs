@@ -1,20 +1,21 @@
 //! Shimadzu LabSolutions `.lcd` run and `.lcm` method reader: properties, method/gradient, peak tables, and chromatograms.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use encoding_rs::GB18030;
-use quick_xml::Reader;
-use quick_xml::events::Event;
+use roxmltree::Node;
 
 use crate::binary::{
-    append_xml_ref, civil_from_days, decode_hex, decode_utf16le, file_name, read_f64_le,
-    read_i32_le, read_u16_le, read_u32_le, round_digits, xml_attr,
+    civil_from_days, decode_hex, decode_utf16le, file_name, read_f64_le, read_i32_le, read_u16_le,
+    read_u32_le, round_digits,
 };
 use crate::error::{InstrumentError, Result};
 use crate::ole::OleFile;
 use crate::types::{
     GradientStep, InstrumentMethod, InstrumentReading, Peak, Technique, Trace, VendorFormat,
 };
+use crate::xml::{elements, parse_xml, text_content, trimmed_text};
 
 const PROCESSED_STORAGE: &str = "LSS Data Processing";
 const ORIGINAL_STORAGE: &str = "LSS Data Processing Original";
@@ -39,7 +40,7 @@ const FILETIME_UNIX_DIFF_SECS: i64 = 11_644_473_600;
 pub struct ShimadzuRun {
     /// UTC injection time as an ISO-8601 string, if recorded.
     pub injected: Option<String>,
-    /// Sample name from `File Property`, if non-empty.
+    /// Trimmed sample name from `File Property`, unless empty or masked with `X`.
     pub sample_name: Option<String>,
     /// Data file basename from `File Property`, if non-empty.
     pub data_file: Option<String>,
@@ -85,22 +86,23 @@ pub fn classify(ole: &OleFile<'_>) -> Option<VendorFormat> {
 /// Parses a Shimadzu `.lcd` compound file into a [`ShimadzuRun`] summary.
 pub fn read_run(data: &[u8]) -> Result<ShimadzuRun> {
     let ole = OleFile::parse(data)?;
-    let prop_bytes = ole.require_stream(FILE_PROPERTY_STREAM)?;
-    let props = parse_properties(&prop_bytes);
-    let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_owned());
+    let props = parse_properties(&ole.require_stream(FILE_PROPERTY_STREAM)?);
+    let run = LcdRun::read(&ole, &props);
+    let file_prop = |key: &str| {
+        props
+            .get(key)
+            .map(|s| file_name(s))
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned)
+    };
     Ok(ShimadzuRun {
-        injected: parse_filetime(
-            props.get("dwLowDateTime").map(String::as_str),
-            props.get("dwHighDateTime").map(String::as_str),
-        ),
-        sample_name: props.get("smpl_name").and_then(|s| non_empty(s)),
-        data_file: props.get("datafile").and_then(|s| non_empty(file_name(s))),
-        method_file: props
-            .get("methodfile")
-            .and_then(|s| non_empty(file_name(s))),
-        instrument: parse_instrument(&ole),
-        method: parse_method(&ole, &props),
-        peaks: read_best_peaks(&ole),
+        injected: run.acquired_at,
+        sample_name: run.sample_name,
+        data_file: file_prop("datafile"),
+        method_file: file_prop("methodfile"),
+        instrument: run.instrument,
+        method: run.method,
+        peaks: run.peaks,
     })
 }
 
@@ -138,33 +140,45 @@ pub fn read_lcd(data: &[u8]) -> Result<InstrumentReading> {
 
 /// Parses a Shimadzu `.lcd` from an already-opened [`OleFile`].
 pub fn read_lcd_ole(ole: &OleFile<'_>) -> Result<InstrumentReading> {
-    let props = read_optional_properties(ole);
-
-    let acquired_at = parse_filetime(
-        props.get("dwLowDateTime").map(String::as_str),
-        props.get("dwHighDateTime").map(String::as_str),
-    );
-    let sample_name = props
-        .get("smpl_name")
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty() && !is_masked(s))
-        .map(ToOwned::to_owned);
-
-    let instrument = Some(parse_instrument(ole));
-    let method = parse_method(ole, &props);
-    let peaks = read_best_peaks(ole);
-    let traces = chromatograms_ole(ole)?;
-
+    let run = LcdRun::read(ole, &read_optional_properties(ole));
     Ok(InstrumentReading {
         technique: Technique::Hplc,
         vendor_format: VendorFormat::ShimadzuLcd,
-        acquired_at,
-        sample_name,
-        instrument,
-        method,
-        peaks,
-        traces,
+        acquired_at: run.acquired_at,
+        sample_name: run.sample_name,
+        instrument: Some(run.instrument),
+        method: run.method,
+        peaks: run.peaks,
+        traces: chromatograms_ole(ole)?,
     })
+}
+
+/// What both `.lcd` readers take from the `File Property` stream and the method and peak streams.
+struct LcdRun {
+    acquired_at: Option<String>,
+    sample_name: Option<String>,
+    instrument: String,
+    method: InstrumentMethod,
+    peaks: Vec<Peak>,
+}
+
+impl LcdRun {
+    fn read(ole: &OleFile<'_>, props: &BTreeMap<String, String>) -> Self {
+        Self {
+            acquired_at: parse_filetime(
+                props.get("dwLowDateTime").map(String::as_str),
+                props.get("dwHighDateTime").map(String::as_str),
+            ),
+            sample_name: props
+                .get("smpl_name")
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty() && !is_masked(s))
+                .map(ToOwned::to_owned),
+            instrument: parse_instrument(ole),
+            method: parse_method(ole, props),
+            peaks: read_best_peaks(ole),
+        }
+    }
 }
 
 fn read_optional_properties(ole: &OleFile<'_>) -> BTreeMap<String, String> {
@@ -599,9 +613,7 @@ fn parse_method(ole: &OleFile<'_>, props: &BTreeMap<String, String>) -> Instrume
         .map(|s| file_name(s))
         .filter(|s| !s.is_empty() && !is_masked(s))
         .map(ToOwned::to_owned);
-    if method.injection_volume_ul.is_none() {
-        method.injection_volume_ul = props.get("inj_vol").and_then(|v| parse_inj_vol(v));
-    }
+    method.injection_volume_ul = props.get("inj_vol").and_then(|v| parse_inj_vol(v));
 
     method
 }
@@ -613,109 +625,83 @@ struct GummData {
     tp_events: Vec<(f64, i32, f64)>,
 }
 
-#[derive(Default)]
-struct UpdEntry {
-    id: String,
-    val: String,
-    kind: Option<String>,
-}
-
-#[derive(Default)]
-struct TimeProgEvent {
-    time_min: Option<f64>,
-    code: Option<i32>,
-    data: Option<f64>,
-}
-
 fn parse_gumm_xml(xml: &str) -> GummData {
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().trim_text(false);
+    let Ok(doc) = parse_xml(xml) else {
+        return GummData::default();
+    };
 
-    let mut out = GummData::default();
-    let mut in_model = false;
-    let mut model_buf = String::new();
-    let mut in_timeprog = false;
-    let mut in_tpld = false;
-    let mut cur_upd: Option<UpdEntry> = None;
-    let mut cur_field: Option<&'static str> = None;
-    let mut cur_event = TimeProgEvent::default();
+    let model_name = elements(doc.root(), "ModelName").find_map(trimmed_text);
 
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(e)) => match e.local_name().as_ref() {
-                "ModelName" if out.model_name.is_none() => {
-                    in_model = true;
-                    model_buf.clear();
-                }
-                "TP" => {
-                    in_timeprog = xml_attr(&e, "PgN").as_deref() == Some("SCL$TIMEPROG");
-                }
-                "TPLD" if in_timeprog => {
-                    in_tpld = true;
-                    cur_event = TimeProgEvent::default();
-                }
-                "UPD" | "TPD" => {
-                    cur_upd = Some(UpdEntry {
-                        id: xml_attr(&e, "ID").unwrap_or_default(),
-                        val: String::new(),
-                        kind: None,
-                    });
-                }
-                "Val" if cur_upd.is_some() => cur_field = Some("Val"),
-                "Type" if cur_upd.is_some() => cur_field = Some("Type"),
-                _ => {}
-            },
-            Ok(Event::GeneralRef(r)) => {
-                if in_model {
-                    append_xml_ref(&mut model_buf, &r);
-                } else if let (Some(upd), Some("Val")) = (cur_upd.as_mut(), cur_field) {
-                    append_xml_ref(&mut upd.val, &r);
-                }
-            }
-            Ok(Event::Text(t)) => {
-                if in_model {
-                    model_buf.push_str(&t);
-                } else if let (Some(upd), Some(field)) = (cur_upd.as_mut(), cur_field) {
-                    match field {
-                        "Val" => upd.val.push_str(&t),
-                        "Type" => {
-                            let s = upd.kind.get_or_insert_with(String::new);
-                            s.push_str(t.trim());
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Ok(Event::End(e)) => match e.local_name().as_ref() {
-                "ModelName" if in_model => {
-                    in_model = false;
-                    out.model_name = Some(std::mem::take(&mut model_buf));
-                }
-                "Val" | "Type" => cur_field = None,
-                "UPD" | "TPD" => {
-                    if let Some(upd) = cur_upd.take() {
-                        if in_tpld {
-                            record_tpld_upd(&upd, &mut cur_event);
-                        } else {
-                            out.params.entry(upd.id).or_insert((upd.val, upd.kind));
-                        }
-                    }
-                }
-                "TPLD" if in_tpld => {
-                    in_tpld = false;
-                    if let (Some(t), Some(code)) = (cur_event.time_min, cur_event.code) {
-                        out.tp_events.push((t, code, cur_event.data.unwrap_or(0.0)));
-                    }
-                }
-                "TP" => in_timeprog = false,
-                _ => {}
-            },
-            Ok(Event::Eof) | Err(_) => break,
-            _ => {}
+    let mut params = BTreeMap::new();
+    for node in doc.descendants().filter(|n| {
+        n.is_element() && matches!(n.tag_name().name(), "UPD" | "TPD") && !in_scl_timeprog_tpld(*n)
+    }) {
+        let val = child_text(node, "Val").unwrap_or_default();
+        let kind = child_text(node, "Type")
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty());
+        if val.is_empty() && kind.is_none() {
+            continue;
         }
+        let id = node.attribute("ID").unwrap_or("").to_owned();
+        params.entry(id).or_insert((val.into_owned(), kind));
     }
 
-    out
+    let tp_events = elements(doc.root(), "TP")
+        .filter(|n| n.attribute("PgN") == Some("SCL$TIMEPROG"))
+        .flat_map(|tp| elements(tp, "TPLD"))
+        .filter_map(parse_tpld_event)
+        .collect();
+
+    GummData {
+        model_name,
+        params,
+        tp_events,
+    }
+}
+
+fn child_text<'a>(node: Node<'a, 'a>, tag: &str) -> Option<Cow<'a, str>> {
+    node.children()
+        .find(|c| c.is_element() && c.tag_name().name() == tag)
+        .map(text_content)
+}
+
+fn in_scl_timeprog_tpld(node: Node<'_, '_>) -> bool {
+    let Some(tpld) = node
+        .ancestors()
+        .skip(1)
+        .find(|a| a.tag_name().name() == "TPLD")
+    else {
+        return false;
+    };
+    tpld.ancestors()
+        .skip(1)
+        .any(|a| a.tag_name().name() == "TP" && a.attribute("PgN") == Some("SCL$TIMEPROG"))
+}
+
+fn parse_tpld_event(tpld: Node<'_, '_>) -> Option<(f64, i32, f64)> {
+    let field = |want: &str| {
+        tpld.descendants()
+            .rfind(|n| {
+                n.is_element()
+                    && matches!(n.tag_name().name(), "UPD" | "TPD")
+                    && n.attribute("ID") == Some(want)
+            })
+            .map(|n| {
+                (
+                    child_text(n, "Val").unwrap_or_default(),
+                    child_text(n, "Type").map(|s| s.trim().to_owned()),
+                )
+            })
+    };
+    let (t_val, t_kind) = field("TMPGtime")?;
+    let (c_val, _) = field("TMPGcode")?;
+    let time_min = decode_upd_float(&t_val, t_kind.as_deref())?;
+    let code = c_val.trim().parse::<i32>().ok()?;
+    let data = field("TMPGdata")
+        .and_then(|(v, k)| decode_upd_float(&v, k.as_deref()))
+        .unwrap_or(0.0);
+    Some((time_min, code, data))
 }
 
 fn find_wavelength(params: &BTreeMap<String, (String, Option<String>)>) -> Option<f64> {
@@ -729,15 +715,6 @@ fn find_wavelength(params: &BTreeMap<String, (String, Option<String>)>) -> Optio
     .find_map(|k| get_upd_float(params, k))
     .filter(|&w| w > 0.0)
     .map(normalize_wavelength_nm)
-}
-
-fn record_tpld_upd(upd: &UpdEntry, ev: &mut TimeProgEvent) {
-    match upd.id.as_str() {
-        "TMPGtime" => ev.time_min = decode_upd_float(&upd.val, upd.kind.as_deref()),
-        "TMPGcode" => ev.code = upd.val.trim().parse::<i32>().ok(),
-        "TMPGdata" => ev.data = decode_upd_float(&upd.val, upd.kind.as_deref()),
-        _ => {}
-    }
 }
 
 fn build_gradient(
@@ -865,4 +842,27 @@ fn is_word_byte(b: u8) -> bool {
 fn is_masked(s: &str) -> bool {
     let trimmed = s.trim();
     !trimmed.is_empty() && trimmed.bytes().all(|b| b == b'X')
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_gumm_xml_skips_empty_model_and_empty_upd_and_joins_split_text() {
+        let xml = "  \n<?xml version=\"1.0\"?>\n\
+<GUM>\n\
+  <ModelName/>\n\
+  <ModelName>CBM<!--x-->-20A</ModelName>\n\
+  <UPD ID=\"A\"/>\n\
+  <UPD ID=\"A\"><Val>1<x/>2</Val><Type>0</Type></UPD>\n\
+</GUM>\0\0";
+
+        let parsed = parse_gumm_xml(xml);
+        assert_eq!(parsed.model_name.as_deref(), Some("CBM-20A"));
+        assert_eq!(
+            parsed.params.get("A"),
+            Some(&("12".to_owned(), Some("0".to_owned())))
+        );
+    }
 }

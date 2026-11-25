@@ -18,6 +18,7 @@ pub mod ole;
 pub mod openlab;
 pub mod shimadzu;
 pub mod types;
+mod xml;
 pub mod zip_archive;
 
 pub use detect::{detect, read, read_files};

@@ -407,52 +407,72 @@ pub fn read_pdata(
 
 /// Reads a Bruker experiment directory (`<exp>/acqus` and optional `<exp>/pdata/1/{procs,1r,title}`).
 pub fn read_dir(exp_dir: &Path) -> Result<InstrumentReading> {
-    let direct_procs = exp_dir.join("procs");
-    let (acqus_path, pdata_dir) = if direct_procs.is_file() {
-        let parent_acqus = exp_dir
-            .parent()
-            .and_then(Path::parent)
-            .map(|p| p.join("acqus"));
-        (parent_acqus, exp_dir.to_path_buf())
+    let (acqus_path, pdata_dir) = if exp_dir.join("procs").is_file() {
+        (
+            exp_dir
+                .parent()
+                .and_then(Path::parent)
+                .map(|p| p.join("acqus")),
+            exp_dir.to_path_buf(),
+        )
     } else {
         (Some(exp_dir.join("acqus")), exp_dir.join("pdata").join("1"))
     };
 
-    let acqus = match acqus_path {
-        Some(p) if p.is_file() => Some(parse_acqus_bytes(&std::fs::read(p)?)?),
-        _ => None,
-    };
+    let acqus_bytes = acqus_path
+        .as_deref()
+        .map(read_optional_file)
+        .transpose()?
+        .flatten();
+    let title_bytes = read_optional_file(&pdata_dir.join("title"))?;
+    let procs_bytes = read_optional_file(&pdata_dir.join("procs"))?;
+    let data_1r = read_optional_file(&pdata_dir.join("1r"))?;
 
-    let procs_path = pdata_dir.join("procs");
-    let data_1r_path = pdata_dir.join("1r");
-    let title_path = pdata_dir.join("title");
-    let title = if title_path.is_file() {
-        let bytes = std::fs::read(title_path)?;
-        first_nonempty_line(&decode_text_auto(&bytes))
-    } else {
-        None
-    };
+    read_experiment_bytes(
+        acqus_bytes.as_deref(),
+        procs_bytes.as_deref(),
+        data_1r.as_deref(),
+        title_bytes.as_deref(),
+    )?
+    .ok_or_else(|| {
+        InstrumentError::InvalidBruker(format!(
+            "no acqus or pdata/1/procs found in {}",
+            exp_dir.display()
+        ))
+    })
+}
 
-    if procs_path.is_file() && data_1r_path.is_file() {
-        let procs = parse_procs_bytes(&std::fs::read(procs_path)?)?;
-        let data_1r = std::fs::read(data_1r_path)?;
-        let trace = read_1r(&data_1r, &procs, acqus.as_ref())?;
-        return Ok(reading_from_parts(
+fn read_optional_file(path: &Path) -> Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err.into()),
+    }
+}
+
+fn read_experiment_bytes(
+    acqus_bytes: Option<&[u8]>,
+    procs_bytes: Option<&[u8]>,
+    data_1r: Option<&[u8]>,
+    title_bytes: Option<&[u8]>,
+) -> Result<Option<InstrumentReading>> {
+    let acqus = acqus_bytes.map(parse_acqus_bytes).transpose()?;
+    let title = title_bytes.and_then(|b| first_nonempty_line(&decode_text_auto(b)));
+
+    if let (Some(procs_raw), Some(r_raw)) = (procs_bytes, data_1r) {
+        let procs = parse_procs_bytes(procs_raw)?;
+        let trace = read_1r(r_raw, &procs, acqus.as_ref())?;
+        return Ok(Some(reading_from_parts(
             acqus.as_ref(),
             Some(&procs),
             Some(trace),
             title,
-        ));
+        )));
     }
 
-    if let Some(acq) = acqus.as_ref() {
-        return Ok(reading_from_parts(Some(acq), None, None, title));
-    }
-
-    Err(InstrumentError::InvalidBruker(format!(
-        "no acqus or pdata/1/procs found in {}",
-        exp_dir.display()
-    )))
+    Ok(acqus
+        .as_ref()
+        .map(|acq| reading_from_parts(Some(acq), None, None, title)))
 }
 
 /// Integrates signal intensity between `lo` and `hi` ppm after subtracting median flank baseline.
@@ -696,5 +716,65 @@ fn median_in_place(values: &mut [f64]) -> Option<f64> {
         Some(values[mid])
     } else {
         Some((values[mid - 1] + values[mid]) / 2.0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_ACQUS: &[u8] = b"##TITLE= Parameter file\n\
+##$NUC1= <1H>\n\
+##$PULPROG= <zg30>\n\
+##$INSTRUM= <Avance NEO 600>\n\
+##$SOLVENT= <CDCl3>\n\
+##$NS= 16\n\
+##$SFO1= 600.13\n\
+##$SW_h= 12000.0\n\
+##END=\n";
+
+    const SAMPLE_PROCS: &[u8] = b"##TITLE= Parameter file\n\
+##$BYTORDP= 0\n\
+##$DTYPP= 0\n\
+##$NC_proc= 0\n\
+##$OFFSET= 12.0\n\
+##$SF= 600.13\n\
+##$SW_p= 12000.0\n\
+##$SI= 2\n\
+##$AXNUC= <1H>\n\
+##END=\n";
+
+    #[test]
+    fn read_experiment_bytes_acqus_only() {
+        let reading = read_experiment_bytes(Some(SAMPLE_ACQUS), None, None, Some(b"\n  Exp 1  \n"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(reading.sample_name.as_deref(), Some("Exp 1"));
+        assert_eq!(reading.instrument.as_deref(), Some("Avance NEO 600"));
+        assert_eq!(reading.method.nucleus.as_deref(), Some("1H"));
+        assert_eq!(reading.method.scans, Some(16));
+        assert!(reading.traces.is_empty());
+    }
+
+    #[test]
+    fn read_experiment_bytes_procs_and_1r() {
+        let mut data_1r = Vec::new();
+        data_1r.extend_from_slice(&100_i32.to_le_bytes());
+        data_1r.extend_from_slice(&250_i32.to_le_bytes());
+
+        let reading = read_experiment_bytes(None, Some(SAMPLE_PROCS), Some(&data_1r), None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(reading.method.nucleus.as_deref(), Some("1H"));
+        assert_eq!(reading.traces.len(), 1);
+        assert_eq!(reading.traces[0].points.len(), 2);
+        assert_eq!(reading.traces[0].points[0].1, 100.0);
+        assert_eq!(reading.traces[0].points[1].1, 250.0);
+    }
+
+    #[test]
+    fn read_experiment_bytes_neither() {
+        let reading = read_experiment_bytes(None, None, None, Some(b"orphan title")).unwrap();
+        assert!(reading.is_none());
     }
 }

@@ -117,43 +117,6 @@ pub(crate) fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-/// Appends an XML general or character entity reference from `quick-xml` into `buf`.
-pub(crate) fn append_xml_ref(buf: &mut String, r: &quick_xml::events::BytesRef<'_>) {
-    if let Ok(Some(ch)) = r.resolve_char_ref() {
-        buf.push(ch);
-        return;
-    }
-    match r.as_ref() {
-        "amp" => buf.push('&'),
-        "lt" => buf.push('<'),
-        "gt" => buf.push('>'),
-        "quot" => buf.push('"'),
-        "apos" => buf.push('\''),
-        other => {
-            buf.push('&');
-            buf.push_str(other);
-            buf.push(';');
-        }
-    }
-}
-
-/// Converts a `quick-xml` local tag name into an owned `String`.
-pub(crate) fn xml_local_name(local: quick_xml::name::LocalName<'_>) -> String {
-    local.into_inner().to_owned()
-}
-
-/// Extracts and unescapes an XML attribute matching `name` by local name.
-pub(crate) fn xml_attr(e: &quick_xml::events::BytesStart<'_>, name: &str) -> Option<String> {
-    for attr in e.attributes().flatten() {
-        if attr.key.local_name().as_ref() == name {
-            return quick_xml::escape::unescape(&attr.value)
-                .ok()
-                .map(|value| value.into_owned());
-        }
-    }
-    None
-}
-
 /// Converts days since `1970-01-01` into `(year, month, day)` in the proleptic Gregorian calendar.
 pub(crate) const fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u32) {
     let z = days_since_unix_epoch + 719_468;
