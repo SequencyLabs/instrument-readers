@@ -5,7 +5,10 @@ use crate::error::{InstrumentError, Result};
 use crate::ole::{OLE_MAGIC, OleFile};
 use crate::types::{InstrumentReading, VendorFormat};
 use crate::zip_archive::{ZIP_EOCD_MAGIC, ZIP_LOCAL_MAGIC, ZipArchive};
-use crate::{andi, bruker, openlab, shimadzu};
+use crate::{
+    andi, bruker, chemstation, chromeleon, newstyle, omnic, openlab, shimadzu, thermo, uvtext,
+    waters,
+};
 
 const MNOVA_MAGIC: &[u8] = b"Mestrelab Research S.L.\xf1\xe2\xd3\xc4";
 const FINNIGAN_UTF16: &[u8] = b"F\0i\0n\0n\0i\0g\0a\0n\0";
@@ -72,6 +75,10 @@ fn detect_by_magic(base_lower: &str, data: &[u8]) -> Option<VendorFormat> {
         return Some(VendorFormat::AndiCdf);
     }
 
+    if chemstation::is_chemstation_ms(data) || chemstation::is_chemstation_ch(data) {
+        return Some(VendorFormat::ChemStation);
+    }
+
     if data.starts_with(b"Spectral Data File")
         || (data.len() >= 30 && &data[..2] == b"\x00\x04" && base_lower.ends_with(".spa"))
     {
@@ -90,6 +97,12 @@ fn detect_by_magic(base_lower: &str, data: &[u8]) -> Option<VendorFormat> {
         }
         if trimmed.contains("<SampleInfo>") && trimmed.contains("<Field>") {
             return Some(VendorFormat::AgilentMassHunter);
+        }
+        if trimmed.starts_with("<Data ")
+            || trimmed.starts_with("<FilterData ")
+            || (trimmed.contains("<Chrom ") && trimmed.contains("samplingRate="))
+        {
+            return Some(VendorFormat::NewstyleNu3000);
         }
         if trimmed.starts_with("$$ Version") || trimmed.contains("$$ Acquired Name:") {
             return Some(VendorFormat::WatersRaw);
@@ -124,6 +137,16 @@ fn detect_by_filename(full_path: &str, base_lower: &str) -> VendorFormat {
     if base_lower.ends_with(".cdf") {
         return VendorFormat::AndiCdf;
     }
+    if base_lower.ends_with(".ch") {
+        return VendorFormat::ChemStation;
+    }
+    if base_lower.ends_with(".icm")
+        || base_lower.ends_with(".filterdata")
+        || base_lower.ends_with(".orgmth")
+        || base_lower.ends_with(".data")
+    {
+        return VendorFormat::NewstyleNu3000;
+    }
     if base_lower.ends_with(".spa") {
         return VendorFormat::OmnicSpa;
     }
@@ -147,6 +170,9 @@ fn detect_by_filename(full_path: &str, base_lower: &str) -> VendorFormat {
     if base_lower == "sample_info.xml" || path_lower.contains(".d/") || path_lower.contains(".d\\")
     {
         return VendorFormat::AgilentMassHunter;
+    }
+    if base_lower.ends_with(".ms") {
+        return VendorFormat::ChemStation;
     }
     if base_lower.ends_with(".raw") || base_lower.ends_with(".sld") {
         return VendorFormat::ThermoRaw;
@@ -197,6 +223,27 @@ pub fn read(filename: Option<&str>, data: &[u8]) -> Result<InstrumentReading> {
         VendorFormat::OpenLabDx => openlab::read_dx(data),
         VendorFormat::OpenLabRx => openlab::read_rx(data),
         VendorFormat::AndiCdf => andi::read_cdf(data),
+        VendorFormat::OmnicSpa => omnic::read_spa(data),
+        VendorFormat::UvText => uvtext::read_uvtext(data),
+        VendorFormat::ThermoRaw => thermo::read_raw(data),
+        VendorFormat::ChromeleonRaw => chromeleon::read_signal(data),
+        VendorFormat::WatersRaw => waters::read_header(data),
+        VendorFormat::ChemStation => {
+            if chemstation::is_chemstation_ms(data) {
+                chemstation::read_ms(data)
+            } else {
+                chemstation::read_ch(data)
+            }
+        }
+        VendorFormat::NewstyleNu3000 => {
+            let base = filename.map(file_name).unwrap_or("").to_ascii_lowercase();
+            let head = &data[..data.len().min(512)];
+            if base.ends_with(".icm") || decode_text_auto(head).contains("<Chrom ") {
+                newstyle::read_icm(data)
+            } else {
+                newstyle::read_data(data)
+            }
+        }
         VendorFormat::BrukerNmr => {
             let base = filename.map(file_name).unwrap_or("").to_ascii_lowercase();
             if matches!(base.as_str(), "procs" | "proc" | "1r" | "1i") {
@@ -262,6 +309,37 @@ pub fn read_files(files: &[(&str, &[u8])]) -> Result<InstrumentReading> {
         .find(|(p, b)| detect(Some(p), b) == VendorFormat::AndiCdf)
     {
         return andi::read_cdf(cdf_bytes);
+    }
+
+    let has_waters = files.iter().any(|(p, b)| {
+        let upper = file_name(p).to_ascii_uppercase();
+        upper == "_HEADER.TXT"
+            || (upper.starts_with("_FUNC") && (upper.ends_with(".DAT") || upper.ends_with(".IDX")))
+            || detect(Some(p), b) == VendorFormat::WatersRaw
+    });
+    if has_waters {
+        return waters::read_bundle(files);
+    }
+
+    let has_chemstation = files
+        .iter()
+        .any(|(_, b)| chemstation::is_chemstation_ch(b) || chemstation::is_chemstation_ms(b));
+    if has_chemstation {
+        return chemstation::read_bundle(files);
+    }
+
+    let has_newstyle = files
+        .iter()
+        .any(|(p, b)| detect(Some(p), b) == VendorFormat::NewstyleNu3000);
+    if has_newstyle {
+        return newstyle::read_bundle(files);
+    }
+
+    let has_chromeleon = files
+        .iter()
+        .any(|(p, b)| detect(Some(p), b) == VendorFormat::ChromeleonRaw);
+    if has_chromeleon {
+        return chromeleon::read_bundle(files);
     }
 
     read(Some(files[0].0), files[0].1)

@@ -1,9 +1,202 @@
-//! Binary ChemStation `.CH` chromatogram decoder used inside Agilent OpenLab `.dx` archives.
+//! Pure-Rust Agilent ChemStation `.CH` chromatogram and `.MS` spectral file decoders.
+//!
+//! Used both for standalone ChemStation `.D` folders (such as Agilent 1200 LC-MS) and for
+//! `.CH` channels embedded inside Agilent OpenLab `.dx` archives.
 
 use crate::binary::{
-    decode_utf16le, file_name, read_f32_be, read_f64_be, read_i16_be, read_i32_be,
+    decode_text_auto, decode_utf16le, file_name, read_f32_be, read_f64_be, read_i16_be,
+    read_i32_be, read_u16_be, read_u16_le, read_u32_be,
 };
-use crate::types::Trace;
+use crate::error::{InstrumentError, Result};
+use crate::types::{InstrumentMethod, InstrumentReading, Technique, Trace, VendorFormat};
+use crate::xml::{elements, parse_xml, trimmed_text};
+
+const MS_MAGIC: [u8; 4] = [0x01, 0x32, 0x00, 0x00];
+const MS_INT_POW8: [u32; 4] = [1, 8, 64, 512];
+
+/// Returns `true` if `data` starts with a recognized ChemStation `.CH` magic header (`30`, `130`, `179`, `181`).
+#[must_use]
+pub fn is_chemstation_ch(data: &[u8]) -> bool {
+    matches!(
+        read_pascal_ascii(data, 0).as_deref(),
+        Some("30" | "130" | "179" | "181")
+    )
+}
+
+/// Returns `true` if `data` starts with the ChemStation `.MS` magic (`\x012\x00\x00`).
+#[must_use]
+pub fn is_chemstation_ms(data: &[u8]) -> bool {
+    data.starts_with(&MS_MAGIC)
+}
+
+/// Parses a standalone ChemStation `.CH` file into an [`InstrumentReading`].
+pub fn read_ch(data: &[u8]) -> Result<InstrumentReading> {
+    let parsed = parse_chemstation_ch(data).ok_or_else(|| {
+        InstrumentError::InvalidChemStation("unrecognized or truncated .CH chromatogram".to_owned())
+    })?;
+    Ok(InstrumentReading {
+        technique: Technique::Hplc,
+        vendor_format: VendorFormat::ChemStation,
+        sample_name: parsed.sample_name,
+        instrument: parsed.instrument,
+        method: InstrumentMethod {
+            name: parsed.method_name,
+            wavelength_nm: parsed.wavelength_nm,
+            ..InstrumentMethod::default()
+        },
+        traces: vec![parsed.trace],
+        ..InstrumentReading::default()
+    })
+}
+
+/// Parses a ChemStation `.MS` (`MSD1.MS`) binary file into a Total Ion Current (TIC) [`InstrumentReading`].
+pub fn read_ms(data: &[u8]) -> Result<InstrumentReading> {
+    if !is_chemstation_ms(data) {
+        return Err(InstrumentError::InvalidChemStation(
+            "missing ChemStation .MS magic header".to_owned(),
+        ));
+    }
+
+    let ms_type = read_pascal_ascii(data, 0x04).unwrap_or_default();
+    let num_times: usize = if ms_type == "MSD Spectral File" {
+        read_u32_be(data, 0x116).ok_or_else(|| {
+            InstrumentError::InvalidChemStation("truncated LC-MS scan count".to_owned())
+        })? as usize
+    } else {
+        usize::from(read_u16_le(data, 0x142).ok_or_else(|| {
+            InstrumentError::InvalidChemStation("truncated GC-MS scan count".to_owned())
+        })?)
+    };
+
+    let raw_start = usize::from(read_u16_be(data, 0x10A).ok_or_else(|| {
+        InstrumentError::InvalidChemStation("truncated .MS data offset".to_owned())
+    })?);
+    let mut pos = raw_start.saturating_mul(2).saturating_sub(2);
+    if pos >= data.len() {
+        return Err(InstrumentError::InvalidChemStation(
+            "invalid .MS data start offset".to_owned(),
+        ));
+    }
+
+    let mut points = Vec::with_capacity(num_times.min(data.len().saturating_sub(pos) / 28));
+    for _ in 0..num_times {
+        if pos + 18 > data.len() {
+            break;
+        }
+        let Some(time_ms) = read_u32_be(data, pos + 2) else {
+            break;
+        };
+        let Some(pair_count) = read_u16_be(data, pos + 12) else {
+            break;
+        };
+        let pairs_start = pos + 18;
+        let pairs_bytes = usize::from(pair_count) * 4;
+        if pairs_start + pairs_bytes > data.len() {
+            break;
+        }
+
+        let mut tic = 0u64;
+        let mut p = pairs_start;
+        for _ in 0..pair_count {
+            let int_enc = u16::from_be_bytes([data[p + 2], data[p + 3]]);
+            let head = usize::from(int_enc >> 14);
+            let tail = u32::from(int_enc & 0x3FFF);
+            tic += u64::from(MS_INT_POW8[head]) * u64::from(tail);
+            p += 4;
+        }
+
+        points.push((f64::from(time_ms) / 60_000.0, tic as f64));
+        pos = pairs_start + pairs_bytes + 10;
+    }
+
+    if points.is_empty() {
+        return Err(InstrumentError::InvalidChemStation(
+            "no scans decoded from .MS file".to_owned(),
+        ));
+    }
+
+    let acquired_at = read_pascal_ascii(data, 0xB2);
+    let method_name = read_pascal_ascii(data, 0xE4)
+        .map(|s| file_name(&s).to_owned())
+        .filter(|s| !s.is_empty());
+
+    Ok(InstrumentReading {
+        technique: Technique::LcMs,
+        vendor_format: VendorFormat::ChemStation,
+        acquired_at,
+        method: InstrumentMethod {
+            name: method_name,
+            ..InstrumentMethod::default()
+        },
+        traces: vec![Trace {
+            label: "MSD1 TIC".to_owned(),
+            x_unit: "min".to_owned(),
+            y_unit: "counts".to_owned(),
+            points,
+        }],
+        ..InstrumentReading::default()
+    })
+}
+
+/// Parses an Agilent ChemStation `.D` directory bundle (`.CH`, `.MS`, and optional `SAMPLE.XML`).
+pub fn read_bundle(files: &[(&str, &[u8])]) -> Result<InstrumentReading> {
+    let mut reading = InstrumentReading {
+        technique: Technique::Hplc,
+        vendor_format: VendorFormat::ChemStation,
+        ..InstrumentReading::default()
+    };
+
+    for &(path, bytes) in files {
+        let base_lower = file_name(path).to_ascii_lowercase();
+        if base_lower == "sample.xml" {
+            if let Some(sample_name) = parse_sample_xml(bytes) {
+                reading.sample_name = Some(sample_name);
+            }
+        } else if base_lower.ends_with(".ch") && is_chemstation_ch(bytes) {
+            if let Some(parsed) = parse_chemstation_ch(bytes) {
+                if reading.sample_name.is_none() {
+                    reading.sample_name = parsed.sample_name;
+                }
+                if reading.instrument.is_none() {
+                    reading.instrument = parsed.instrument;
+                }
+                if reading.method.name.is_none() {
+                    reading.method.name = parsed.method_name;
+                }
+                if reading.method.wavelength_nm.is_none() {
+                    reading.method.wavelength_nm = parsed.wavelength_nm;
+                }
+                reading.traces.push(parsed.trace);
+            }
+        } else if base_lower.ends_with(".ms")
+            && is_chemstation_ms(bytes)
+            && let Ok(ms_reading) = read_ms(bytes)
+        {
+            reading.technique = Technique::LcMs;
+            if reading.acquired_at.is_none() {
+                reading.acquired_at = ms_reading.acquired_at;
+            }
+            if reading.method.name.is_none() {
+                reading.method.name = ms_reading.method.name;
+            }
+            reading.traces.extend(ms_reading.traces);
+        }
+    }
+
+    if reading.traces.is_empty() {
+        return Err(InstrumentError::InvalidChemStation(
+            "bundle contains no readable .CH or .MS files".to_owned(),
+        ));
+    }
+
+    Ok(reading)
+}
+
+fn parse_sample_xml(bytes: &[u8]) -> Option<String> {
+    let text = decode_text_auto(bytes);
+    let doc = parse_xml(&text).ok()?;
+    elements(doc.root(), "Name").find_map(trimmed_text)
+}
 
 pub(crate) struct ParsedCh {
     pub sample_name: Option<String>,
@@ -191,7 +384,7 @@ fn decode_ch_delta(buf: &[u8]) -> Vec<f64> {
                 pos += 4;
                 accum = i64::from(abs_val);
             } else {
-                accum += i64::from(delta);
+                accum = accum.wrapping_add(i64::from(delta));
             }
             out.push(accum as f64);
         }
@@ -217,8 +410,8 @@ fn decode_ch_double_delta(buf: &[u8]) -> Vec<f64> {
             acc0 = (i64::from(hi) << 32) | i64::from(lo as u32);
             acc1 = 0;
         } else {
-            acc1 += i64::from(d2);
-            acc0 += acc1;
+            acc1 = acc1.wrapping_add(i64::from(d2));
+            acc0 = acc0.wrapping_add(acc1);
         }
         out.push(acc0 as f64);
     }

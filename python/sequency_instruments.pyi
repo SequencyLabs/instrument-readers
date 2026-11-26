@@ -120,3 +120,144 @@ def openlab_read_acaml(acaml: bytes) -> InstrumentReading: ...
 def openlab_read_dx(dx: bytes) -> InstrumentReading: ...
 def openlab_read_rx(rx: bytes) -> InstrumentReading: ...
 def openlab_parse_rx_peaks(rx: bytes) -> list[Peak]: ...
+
+class AndiDataset:
+    sample_name: str | None
+    operator_name: str | None
+    source_file_reference: str | None
+    detection_method_name: str | None
+    injection_date_time_stamp: str | None
+    acquired_at: str | None
+    sampling_interval_s: float | None
+    peaks: list[Peak]
+    traces: list[Trace]
+
+class OmnicHeader:
+    title: str
+    y_unit: str | None
+    acquired_epoch_secs: int
+
+class OmnicSpectrum:
+    wavenumbers: list[float]
+    intensities: list[float]
+    title: str
+    y_unit: str | None
+    acquired_epoch_secs: int
+
+class UvTextTable:
+    wavelengths: list[float]
+    scans: list[list[float]]
+
+class ThermoRow:
+    sample_name: str
+    sample_id: str
+    data_file: str
+    vial: str
+    method: str
+
+class ThermoFile:
+    first: str
+    second: str
+    logins: list[str]
+    rows: list[ThermoRow]
+    instrument: str | None
+    scans: int
+    minutes: tuple[float, float] | None
+
+class ThermoScans:
+    minutes: list[float]
+    tic: list[float]
+    offsets: list[int]
+    data_offset: int
+
+class WatersUvChannel:
+    wavelength: float
+    values: list[float]
+
+class WatersPolarityRun:
+    polarity: str
+    acquired: str | None
+    instrument: str | None
+    inlet_method: str | None
+    ms_method: str | None
+    rt: list[float]
+    mz: list[float]
+    intensity: list[float]
+    uv_rt: list[float] | None
+    uv: list[WatersUvChannel]
+
+class MassHunterScan:
+    minutes: float
+    polarity: str
+    tic: float
+    offset: int
+    length: int
+    points: int
+    calibration: list[float]
+    flags: int | None
+
+class MnovaEmbedded:
+    name: str
+    entry: tuple[int, int]
+    start: int
+    end: int
+    path: tuple[int, int]
+    after: tuple[int, int]
+    text: bytes
+
+class MnovaRow:
+    span: tuple[int, int]
+    label: str | None
+    key: str | None
+    formula: str | None
+    value: tuple[int, int]
+
+class MnovaSpectrum:
+    dataset: str
+    expno: str
+    position: int
+    acqus: AcqusParams
+
+class MnovaJ2kFrame:
+    at: int
+    position: int | None
+    nucleus: str
+    low_hz: float
+    mhz: float
+    width_hz: float
+    low_val: float
+    high_val: float
+    depth: int
+    codestream: bytes
+
+def andi_parse_cdf(data: bytes) -> AndiDataset: ...
+def chromeleon_signal_name(data: bytes) -> str | None: ...
+def chromeleon_decode_signal(data: bytes) -> tuple[list[float], list[float]]: ...
+def omnic_parse_header(data: bytes) -> OmnicHeader: ...
+def omnic_parse_spa(data: bytes) -> OmnicSpectrum: ...
+def uvtext_parse(data: bytes) -> UvTextTable: ...
+def thermo_parse_run(data: bytes) -> ThermoFile: ...
+def thermo_parse_sequence(data: bytes) -> ThermoFile: ...
+def thermo_ms_header_offset(data: bytes) -> int | None: ...
+def thermo_decode_scan_index(entries: bytes, data_offset: int) -> ThermoScans: ...
+def thermo_decode_peak_record(record: bytes) -> tuple[int, int]: ...
+def thermo_decode_peak_pairs(bytes: bytes) -> tuple[list[float], list[float]]: ...
+def waters_read_polarities(files: list[tuple[str, bytes]], bin_width: float = 0.1) -> dict[str, WatersPolarityRun]: ...
+def masshunter_profile_scans(
+    msscan_bin: bytes,
+    msscan_xsd: bytes,
+    msts_xml: bytes | None = None,
+    masscal_bin: bytes | None = None,
+    default_masscal_xml: bytes | None = None,
+) -> list[MassHunterScan]: ...
+def masshunter_decode_spectrum(
+    segment: bytes,
+    num_points: int,
+    calibration: Sequence[float],
+    use_flags: int | None = None,
+) -> tuple[list[float], list[float]]: ...
+def mnova_embedded(content: bytes) -> list[MnovaEmbedded]: ...
+def mnova_rows(content: bytes) -> list[MnovaRow]: ...
+def mnova_measurements(content: bytes) -> list[tuple[int, int]]: ...
+def mnova_spectra(content: bytes) -> list[MnovaSpectrum]: ...
+def mnova_j2k_frames(content: bytes) -> list[MnovaJ2kFrame]: ...

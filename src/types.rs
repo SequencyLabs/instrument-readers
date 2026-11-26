@@ -76,6 +76,10 @@ pub enum VendorFormat {
     WatersRaw,
     /// Agilent MassHunter `.d` folder (`sample_info.xml`).
     AgilentMassHunter,
+    /// Agilent ChemStation `.D` folder, `.ch` chromatogram, or `.ms` mass spectrum.
+    ChemStation,
+    /// Newstyle (Qingbohua) NU3000 prep-HPLC XML data (`.Data`, `.FilterData`, `.icm`, `.sys`).
+    NewstyleNu3000,
     /// Plain-text UV export (`.all`, `.spe`, `.sp2`).
     UvText,
     /// Unrecognized format.
@@ -102,6 +106,8 @@ impl VendorFormat {
             Self::ChromeleonRaw => "chromeleon_raw",
             Self::WatersRaw => "waters_raw",
             Self::AgilentMassHunter => "agilent_masshunter",
+            Self::ChemStation => "chemstation",
+            Self::NewstyleNu3000 => "newstyle_nu3000",
             Self::UvText => "uv_text",
             Self::Unknown => "unknown",
         }
@@ -117,7 +123,9 @@ impl VendorFormat {
             | Self::OpenLabDx
             | Self::OpenLabRx
             | Self::AndiCdf
-            | Self::ChromeleonRaw => Technique::Hplc,
+            | Self::ChromeleonRaw
+            | Self::ChemStation
+            | Self::NewstyleNu3000 => Technique::Hplc,
             Self::ThermoRaw | Self::WatersRaw | Self::AgilentMassHunter => Technique::LcMs,
             Self::BrukerNmr | Self::MestReNova => Technique::Nmr,
             Self::OmnicSpa => Technique::Ir,

@@ -1,5 +1,7 @@
 //! PyO3 bindings exposing `sequency-instruments` binary parsers to Python.
 
+mod formats;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -15,7 +17,7 @@ use sequency_instruments::{
 
 type Extent = (usize, usize);
 
-fn py_result<T>(res: sequency_instruments::Result<T>) -> PyResult<T> {
+pub(crate) fn py_result<T>(res: sequency_instruments::Result<T>) -> PyResult<T> {
     res.map_err(|err| PyValueError::new_err(err.to_string()))
 }
 
@@ -442,7 +444,7 @@ fn read(data: &[u8], filename: Option<&str>) -> PyResult<InstrumentReading> {
 /// Automatically detects and parses a multi-file instrument artifact bundle in memory.
 #[pyfunction]
 fn read_files(files: &Bound<'_, PyAny>) -> PyResult<InstrumentReading> {
-    let owned: Vec<(String, Vec<u8>)> = files.extract()?;
+    let owned = formats::extract_file_bundle(files)?;
     let refs: Vec<(&str, &[u8])> = owned
         .iter()
         .map(|(name, bytes)| (name.as_str(), bytes.as_slice()))
@@ -636,5 +638,6 @@ fn sequency_instruments_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(openlab_read_dx, m)?)?;
     m.add_function(wrap_pyfunction!(openlab_read_rx, m)?)?;
     m.add_function(wrap_pyfunction!(openlab_parse_rx_peaks, m)?)?;
+    formats::register(m)?;
     Ok(())
 }

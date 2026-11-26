@@ -749,7 +749,12 @@ fn round_up_4(n: usize) -> Result<usize> {
 
 fn decode_c_string(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    String::from_utf8_lossy(&bytes[..end]).trim().to_owned()
+    let slice = &bytes[..end];
+    if let Ok(utf8) = std::str::from_utf8(slice) {
+        return utf8.trim().to_owned();
+    }
+    let (decoded, _, _) = encoding_rs::GB18030.decode(slice);
+    decoded.trim().to_owned()
 }
 
 pub(crate) fn invalid(msg: impl Into<String>) -> InstrumentError {

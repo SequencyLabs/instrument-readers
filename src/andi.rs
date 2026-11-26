@@ -53,6 +53,12 @@ pub struct AndiDataset {
     pub version: NetCdfVersion,
     /// Sample name from the `sample_name` global attribute.
     pub sample_name: Option<String>,
+    /// Operator name from `operator_name`.
+    pub operator_name: Option<String>,
+    /// Detection method name from `detection_method_name`.
+    pub detection_method_name: Option<String>,
+    /// Raw `injection_date_time_stamp` global attribute, when present.
+    pub injection_date_time_stamp: Option<String>,
     /// Normalized acquisition timestamp from `dataset_date_time_stamp` or `injection_date_time_stamp`.
     pub acquired_at: Option<String>,
     /// Detector name from `detector_name`.
@@ -80,6 +86,13 @@ pub fn parse_cdf(data: &[u8]) -> Result<AndiDataset> {
     let nc = NetCdfFile::parse(data)?;
 
     let sample_name = nc.global_str("sample_name").map(ToOwned::to_owned);
+    let operator_name = nc.global_str("operator_name").map(ToOwned::to_owned);
+    let detection_method_name = nc
+        .global_str("detection_method_name")
+        .map(ToOwned::to_owned);
+    let injection_date_time_stamp = nc
+        .global_str("injection_date_time_stamp")
+        .map(ToOwned::to_owned);
     let acquired_at = nc
         .global_str("dataset_date_time_stamp")
         .or_else(|| nc.global_str("injection_date_time_stamp"))
@@ -124,6 +137,9 @@ pub fn parse_cdf(data: &[u8]) -> Result<AndiDataset> {
     Ok(AndiDataset {
         version: nc.version(),
         sample_name,
+        operator_name,
+        detection_method_name,
+        injection_date_time_stamp,
         acquired_at,
         detector_name,
         experiment_title,

@@ -6,11 +6,16 @@ This is a mirror of a folder in our internal codebase. While issues and PRs will
 
 ## Supported formats
 
-The library extracts unified metadata, method settings, peak tables, and traces from three file families:
+The library extracts unified metadata, method settings, peak tables, and traces from eight file families:
 
 - parses Shimadzu LabSolutions `.lcd` run files and `.lcm` method files stored in the OLE2 Compound File Binary Format, including `File Property` fields, `GUC.1.METHOD` mobile phases, flow, oven temperature, and gradients, `PDA.1.METHOD` wavelengths, `PT-*` peak tables, and delta-encoded chromatograms
 - reads Bruker TopSpin NMR runs, including `acqus` and `procs` JCAMP-DX parameters, `BYTORDP` byte-order handling, `NC_proc` power-of-two scaling, and `1r` real spectra
 - parses Agilent OpenLab CDS `.acaml` XML result sets and zipped `.dx` and `.rx` archives, including `Base/InjectionACAML` peaks and ChemStation `.CH` channels
+- parses standalone Agilent ChemStation `.D` folders, `.ch` chromatograms, and `.ms` (`MSD1.MS`) total ion current traces
+- parses ANDI Chromatography netCDF-3 `.cdf` files (CDF-1 and CDF-2)
+- decodes Thermo Chromeleon 7 `SignHdr` `.raw` signal streams (`PtsLL2Df` blocks)
+- reads Waters MassLynx `.raw` LC-MS directories (`_HEADER.TXT`, `_extern.inf`, `_FUNC*.IDX`, and 2-, 4-, 6-, and 8-byte `_FUNC*.DAT` traces)
+- reads Newstyle (Qingbohua) NU3000 prep-HPLC XML datasets (`.Data`, `.FilterData`, `.icm` peaks, and `.sys` device metadata)
 
 `detect` identifies file formats from magic bytes and filenames. `Trace::downsample_lttb` and `Trace::downsample_minmax` reduce dense curves for plotting while preserving narrow peaks.
 

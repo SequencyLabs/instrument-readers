@@ -9,6 +9,16 @@ pub(crate) fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
     Some(u16::from_le_bytes(bytes))
 }
 
+pub(crate) fn read_u16_be(data: &[u8], offset: usize) -> Option<u16> {
+    let bytes: [u8; 2] = data.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    Some(u16::from_be_bytes(bytes))
+}
+
+pub(crate) fn read_i16_le(data: &[u8], offset: usize) -> Option<i16> {
+    let bytes: [u8; 2] = data.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    Some(i16::from_le_bytes(bytes))
+}
+
 pub(crate) fn read_i16_be(data: &[u8], offset: usize) -> Option<i16> {
     let bytes: [u8; 2] = data.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
     Some(i16::from_be_bytes(bytes))
@@ -34,6 +44,11 @@ pub(crate) fn read_i32_be(data: &[u8], offset: usize) -> Option<i32> {
     Some(i32::from_be_bytes(bytes))
 }
 
+pub(crate) fn read_f32_le(data: &[u8], offset: usize) -> Option<f32> {
+    let bytes: [u8; 4] = data.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(f32::from_le_bytes(bytes))
+}
+
 pub(crate) fn read_f32_be(data: &[u8], offset: usize) -> Option<f32> {
     let bytes: [u8; 4] = data.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
     Some(f32::from_be_bytes(bytes))
@@ -42,6 +57,11 @@ pub(crate) fn read_f32_be(data: &[u8], offset: usize) -> Option<f32> {
 pub(crate) fn read_u64_le(data: &[u8], offset: usize) -> Option<u64> {
     let bytes: [u8; 8] = data.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
     Some(u64::from_le_bytes(bytes))
+}
+
+pub(crate) fn read_i64_le(data: &[u8], offset: usize) -> Option<i64> {
+    let bytes: [u8; 8] = data.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
+    Some(i64::from_le_bytes(bytes))
 }
 
 pub(crate) fn read_u64_be(data: &[u8], offset: usize) -> Option<u64> {
@@ -142,14 +162,24 @@ pub(crate) const fn civil_from_days(days_since_unix_epoch: i64) -> (i64, u32, u3
     (year, m as u32, d as u32)
 }
 
-/// Formats a Unix timestamp in seconds at UTC+08:00 as `YYYY-MM-DD HH:MM:SS +0800`.
-pub(crate) fn format_unix_plus_0800(unix_secs: i64) -> String {
-    let local = unix_secs + 8 * 3600;
+/// Formats a Unix timestamp in seconds with a fixed timezone offset, date/time separator, and suffix.
+pub(crate) fn format_unix_timestamp(
+    unix_secs: i64,
+    tz_offset_secs: i64,
+    sep: char,
+    tz_suffix: &str,
+) -> String {
+    let local = unix_secs + tz_offset_secs;
     let days = local.div_euclid(86_400);
     let secs_of_day = local.rem_euclid(86_400) as u32;
     let (year, month, day) = civil_from_days(days);
     let hour = secs_of_day / 3600;
     let minute = (secs_of_day % 3600) / 60;
     let second = secs_of_day % 60;
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} +0800")
+    format!("{year:04}-{month:02}-{day:02}{sep}{hour:02}:{minute:02}:{second:02}{tz_suffix}")
+}
+
+/// Formats a Unix timestamp in seconds at UTC+08:00 as `YYYY-MM-DD HH:MM:SS +0800`.
+pub(crate) fn format_unix_plus_0800(unix_secs: i64) -> String {
+    format_unix_timestamp(unix_secs, 8 * 3600, ' ', " +0800")
 }
