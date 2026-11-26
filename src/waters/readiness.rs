@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::binary::file_name;
 
 use super::metadata::parse_func_number;
-use super::{FUNCTNS_RECORD_LEN, pair_has_complete_scan};
+use super::{FUNCTNS_RECORD_LEN, IDX_RECORD_LEN, pair_has_complete_scan};
 
 /// Pure metadata view of one file inside a candidate Waters `.raw` directory.
 #[derive(Debug, Clone, Copy)]
@@ -67,7 +67,10 @@ impl WatersDirGroup<'_> {
             let Some(bytes) = idx_bytes else {
                 return false;
             };
-            if !pair_has_complete_scan(bytes, dat_len) {
+            if bytes.is_empty()
+                || !bytes.len().is_multiple_of(IDX_RECORD_LEN)
+                || !pair_has_complete_scan(bytes, dat_len)
+            {
                 return false;
             }
             saw_non_empty = true;
@@ -116,4 +119,135 @@ pub fn is_bundle_ready(files: &[WatersBundleFile<'_>]) -> bool {
     let waters_groups: Vec<&WatersDirGroup<'_>> =
         groups.values().filter(|g| g.has_waters_files()).collect();
     !waters_groups.is_empty() && waters_groups.iter().all(|g| g.is_ready())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn single_scan_idx() -> [u8; 22] {
+        let mut idx = [0u8; 22];
+        idx[4..8].copy_from_slice(&1u32.to_le_bytes());
+        idx[12..16].copy_from_slice(&1.25_f32.to_le_bytes());
+        idx
+    }
+
+    #[test]
+    fn rejects_partial_idx_record_mid_write_and_accepts_complete_record() {
+        let complete_idx = single_scan_idx();
+        let mut partial_idx = complete_idx.to_vec();
+        partial_idx.extend_from_slice(&[0u8; 8]);
+
+        let partial_files = [
+            WatersBundleFile {
+                relative_path: "run.raw/_HEADER.TXT",
+                size_bytes: 64,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNC001.DAT",
+                size_bytes: 6,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNC001.IDX",
+                size_bytes: partial_idx.len() as u64,
+                idx_bytes: Some(&partial_idx),
+            },
+        ];
+        assert!(!is_bundle_ready(&partial_files));
+
+        let complete_files = [
+            WatersBundleFile {
+                relative_path: "run.raw/_HEADER.TXT",
+                size_bytes: 64,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNC001.DAT",
+                size_bytes: 6,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNC001.IDX",
+                size_bytes: complete_idx.len() as u64,
+                idx_bytes: Some(&complete_idx),
+            },
+        ];
+        assert!(is_bundle_ready(&complete_files));
+    }
+
+    #[test]
+    fn enforces_functns_inf_count_and_allows_empty_secondary_function() {
+        let idx = single_scan_idx();
+        let missing_second = [
+            WatersBundleFile {
+                relative_path: "run.raw/_HEADER.TXT",
+                size_bytes: 64,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNCTNS.INF",
+                size_bytes: 832,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNC001.DAT",
+                size_bytes: 6,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNC001.IDX",
+                size_bytes: 22,
+                idx_bytes: Some(&idx),
+            },
+        ];
+        assert!(!is_bundle_ready(&missing_second));
+
+        let empty_second = [
+            missing_second[0],
+            missing_second[1],
+            missing_second[2],
+            missing_second[3],
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNC002.DAT",
+                size_bytes: 0,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "run.raw/_FUNC002.IDX",
+                size_bytes: 0,
+                idx_bytes: Some(&[]),
+            },
+        ];
+        assert!(is_bundle_ready(&empty_second));
+    }
+
+    #[test]
+    fn disjoint_waters_subdirectories_do_not_satisfy_each_other() {
+        let idx = single_scan_idx();
+        let split = [
+            WatersBundleFile {
+                relative_path: "export/a.raw/_HEADER.TXT",
+                size_bytes: 64,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "export/a.raw/_FUNC001.DAT",
+                size_bytes: 6,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "export/b.raw/_HEADER.TXT",
+                size_bytes: 64,
+                idx_bytes: None,
+            },
+            WatersBundleFile {
+                relative_path: "export/b.raw/_FUNC001.IDX",
+                size_bytes: 22,
+                idx_bytes: Some(&idx),
+            },
+        ];
+        assert!(!is_bundle_ready(&split));
+    }
 }
