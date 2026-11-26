@@ -341,3 +341,207 @@ fn waters_masslynx_bundle_decodes_header_polarities_and_2_4_6_byte_functions() {
         Err(InstrumentError::InvalidWaters(_))
     ));
 }
+
+#[test]
+fn waters_functns_inf_identifies_type_12_uv_even_with_6_byte_records_and_excludes_unlabeled_ms() {
+    let header = b"$$ Version: 01.00\r\n$$ Acquired Name: 20261126-UV6\r\n";
+    let extern_inf = b"Instrument Parameters\r\nPolarity\t\t\tES+\r\n";
+
+    let mut functns_inf = vec![0u8; 416 * 3];
+    functns_inf[0] = 0;
+    functns_inf[416] = 0;
+    functns_inf[416 * 2] = 12;
+
+    let mut f1_dat = Vec::new();
+    f1_dat.extend_from_slice(&100i16.to_le_bytes());
+    f1_dat.extend_from_slice(&200u32.to_le_bytes());
+    let f1_idx = build_waters_idx_record(0, 1, 0.5);
+
+    let mut f2_dat = Vec::new();
+    f2_dat.extend_from_slice(&75i16.to_le_bytes());
+    f2_dat.extend_from_slice(&350u32.to_le_bytes());
+    let f2_idx = build_waters_idx_record(0, 1, 0.5);
+
+    let encode_dat6_key = |wl: u32| -> u32 { (wl << 9) | (23 << 4) };
+    let mut f3_dat = Vec::new();
+    f3_dat.extend_from_slice(&50i16.to_le_bytes());
+    f3_dat.extend_from_slice(&encode_dat6_key(210).to_le_bytes());
+    f3_dat.extend_from_slice(&120i16.to_le_bytes());
+    f3_dat.extend_from_slice(&encode_dat6_key(254).to_le_bytes());
+    let f3_idx = build_waters_idx_record(0, 2, 0.5);
+
+    let files: &[(&str, &[u8])] = &[
+        ("run.raw/_HEADER.TXT", header),
+        ("run.raw/_extern.inf", extern_inf),
+        ("run.raw/_FUNCTNS.INF", &functns_inf),
+        ("run.raw/_FUNC001.DAT", &f1_dat),
+        ("run.raw/_FUNC001.IDX", &f1_idx),
+        ("run.raw/_FUNC002.DAT", &f2_dat),
+        ("run.raw/_FUNC002.IDX", &f2_idx),
+        ("run.raw/_FUNC003.DAT", &f3_dat),
+        ("run.raw/_FUNC003.IDX", &f3_idx),
+    ];
+
+    let reading = waters::read_bundle(files).unwrap();
+    assert_eq!(reading.traces.len(), 3);
+    assert_eq!(reading.traces[0].label, "ESI+ TIC (Func 1)");
+    assert_eq!(reading.traces[1].label, "MS TIC (Func 2)");
+    assert_eq!(reading.traces[2].label, "UV (Func 3)");
+
+    let polarities = waters::read_polarities(files, 1.0).unwrap();
+    let es_plus = polarities.get("+").expect("ES+ polarity run");
+    assert_eq!(es_plus.uv.len(), 2);
+    assert!((es_plus.uv[0].wavelength - 210.0).abs() < 1e-6);
+    assert!((es_plus.uv[1].wavelength - 254.0).abs() < 1e-6);
+}
+
+#[test]
+fn waters_polarity_maps_by_function_number_when_uv_or_unlabeled_ms_precedes_ms() {
+    let header = b"$$ Version: 01.00\r\n$$ Acquired Name: 20261126-ORDER\r\n";
+    let encode_dat6_key = |wl: u32| -> u32 { (wl << 9) | (23 << 4) };
+
+    let mut functns_a = vec![0u8; 416 * 2];
+    functns_a[0] = 12;
+    functns_a[416] = 0;
+    let extern_a = b"Function 2\r\nPolarity\t\tES+\r\n";
+
+    let mut uv_dat = Vec::new();
+    uv_dat.extend_from_slice(&80i16.to_le_bytes());
+    uv_dat.extend_from_slice(&encode_dat6_key(254).to_le_bytes());
+    let uv_idx = build_waters_idx_record(0, 1, 0.5);
+
+    let mut ms_dat = Vec::new();
+    ms_dat.extend_from_slice(&100i16.to_le_bytes());
+    ms_dat.extend_from_slice(&encode_dat6_key(200).to_le_bytes());
+    let ms_idx = build_waters_idx_record(0, 1, 0.5);
+
+    let files_a: &[(&str, &[u8])] = &[
+        ("a.raw/_HEADER.TXT", header),
+        ("a.raw/_extern.inf", extern_a),
+        ("a.raw/_FUNCTNS.INF", &functns_a),
+        ("a.raw/_FUNC001.DAT", &uv_dat),
+        ("a.raw/_FUNC001.IDX", &uv_idx),
+        ("a.raw/_FUNC002.DAT", &ms_dat),
+        ("a.raw/_FUNC002.IDX", &ms_idx),
+    ];
+    let reading_a = waters::read_bundle(files_a).unwrap();
+    assert_eq!(reading_a.traces[0].label, "UV (Func 1)");
+    assert_eq!(reading_a.traces[0].y_unit, "AU");
+    assert_eq!(reading_a.traces[1].label, "ESI+ TIC (Func 2)");
+    assert_eq!(reading_a.traces[1].y_unit, "counts");
+    let pols_a = waters::read_polarities(files_a, 1.0).unwrap();
+    let es_plus = pols_a.get("+").expect("ES+ polarity run for Func 2");
+    assert_eq!(es_plus.uv.len(), 1);
+    assert!((es_plus.uv[0].wavelength - 254.0).abs() < 1e-6);
+
+    let mut functns_b = vec![0u8; 416 * 2];
+    functns_b[0] = 0;
+    functns_b[416] = 0;
+    let extern_b =
+        b"Instrument Parameters\r\nCapillary\t\t3.0\r\nInstrument Parameters\r\nPolarity\t\tES-\r\n";
+    let files_b: &[(&str, &[u8])] = &[
+        ("b.raw/_HEADER.TXT", header),
+        ("b.raw/_extern.inf", extern_b),
+        ("b.raw/_FUNCTNS.INF", &functns_b),
+        ("b.raw/_FUNC001.DAT", &ms_dat),
+        ("b.raw/_FUNC001.IDX", &ms_idx),
+        ("b.raw/_FUNC002.DAT", &ms_dat),
+        ("b.raw/_FUNC002.IDX", &ms_idx),
+    ];
+    let reading_b = waters::read_bundle(files_b).unwrap();
+    assert_eq!(reading_b.traces[0].label, "MS TIC (Func 1)");
+    assert_eq!(reading_b.traces[1].label, "ESI- TIC (Func 2)");
+
+    let header_cal =
+        b"$$ Version: 01.00\r\n$$ Acquired Name: 20261126-CAL\r\n$$ Cal Function 2: 10,1\r\n";
+    let mut f1_ms = Vec::new();
+    f1_ms.extend_from_slice(&11i16.to_le_bytes());
+    f1_ms.extend_from_slice(&encode_dat6_key(100).to_le_bytes());
+    let mut f2_ms = Vec::new();
+    f2_ms.extend_from_slice(&99i16.to_le_bytes());
+    f2_ms.extend_from_slice(&encode_dat6_key(200).to_le_bytes());
+
+    let extern_vendor = b"Instrument Parameters - Function 2:\r\nPolarity\t\tES-\r\n";
+    let files_c: &[(&str, &[u8])] = &[
+        ("c.raw/_HEADER.TXT", header_cal),
+        ("c.raw/_extern.inf", extern_vendor),
+        ("c.raw/_FUNCTNS.INF", &functns_b),
+        ("c.raw/_FUNC001.DAT", &f1_ms),
+        ("c.raw/_FUNC001.IDX", &ms_idx),
+        ("c.raw/_FUNC002.DAT", &f2_ms),
+        ("c.raw/_FUNC002.IDX", &ms_idx),
+    ];
+    let reading_c = waters::read_bundle(files_c).unwrap();
+    assert_eq!(reading_c.traces[0].label, "MS TIC (Func 1)");
+    assert_eq!(reading_c.traces[1].label, "ESI- TIC (Func 2)");
+
+    let extern_bleed = b"Function 1\r\nFunction 2\r\nPolarity\t\tES+\r\n";
+    let files_d: &[(&str, &[u8])] = &[
+        ("d.raw/_HEADER.TXT", header_cal),
+        ("d.raw/_extern.inf", extern_bleed),
+        ("d.raw/_FUNCTNS.INF", &functns_b),
+        ("d.raw/_FUNC001.DAT", &f1_ms),
+        ("d.raw/_FUNC001.IDX", &ms_idx),
+        ("d.raw/_FUNC002.DAT", &f2_ms),
+        ("d.raw/_FUNC002.IDX", &ms_idx),
+    ];
+    let reading_d = waters::read_bundle(files_d).unwrap();
+    assert_eq!(reading_d.traces[0].label, "MS TIC (Func 1)");
+    assert_eq!(reading_d.traces[1].label, "ESI+ TIC (Func 2)");
+    let pols_d = waters::read_polarities(files_d, 1.0).unwrap();
+    let es_plus_d = pols_d.get("+").expect("ES+ polarity run for Func 2");
+    assert_eq!(es_plus_d.mz, vec![210.0]);
+    assert_eq!(es_plus_d.intensity, vec![99.0]);
+
+    let header_mixed = b"$$ Version: 01.00\r\n$$ Acquired Name: 20261126-MIXED\r\n$$ Cal Function 1: 10,1\r\n$$ Cal Function: 20,1\r\n";
+    let extern_mixed =
+        b"Function 1\r\nPolarity\t\tES-\r\nInstrument Parameters\r\nPolarity\t\tES+\r\n";
+    let files_e: &[(&str, &[u8])] = &[
+        ("e.raw/_HEADER.TXT", header_mixed),
+        ("e.raw/_extern.inf", extern_mixed),
+        ("e.raw/_FUNCTNS.INF", &functns_b),
+        ("e.raw/_FUNC001.DAT", &f1_ms),
+        ("e.raw/_FUNC001.IDX", &ms_idx),
+        ("e.raw/_FUNC002.DAT", &f2_ms),
+        ("e.raw/_FUNC002.IDX", &ms_idx),
+    ];
+    let reading_e = waters::read_bundle(files_e).unwrap();
+    assert_eq!(reading_e.traces[0].label, "ESI- TIC (Func 1)");
+    assert_eq!(reading_e.traces[1].label, "ESI+ TIC (Func 2)");
+    let pols_e = waters::read_polarities(files_e, 1.0).unwrap();
+    assert_eq!(pols_e.get("-").expect("ES-").mz, vec![110.0]);
+    assert_eq!(pols_e.get("+").expect("ES+").mz, vec![220.0]);
+
+    let extern_repeated =
+        b"Function 1\r\nPolarity\tES+\r\nCone Voltage\t20\r\nCone Voltage\t35\r\nFunction 2\r\nPolarity\tES-\r\n";
+    let acq = waters::parse_acquisition(&[
+        ("f.raw/_HEADER.TXT", header_mixed),
+        ("f.raw/_extern.inf", extern_repeated),
+        ("f.raw/_FUNCTNS.INF", &functns_b),
+        ("f.raw/_FUNC001.DAT", &f1_ms),
+        ("f.raw/_FUNC001.IDX", &ms_idx),
+        ("f.raw/_FUNC002.DAT", &f2_ms),
+    ])
+    .unwrap();
+    assert_eq!(acq.functions.len(), 2);
+    assert!(matches!(
+        acq.functions[&1].status,
+        waters::WatersFunctionStatus::Complete {
+            scan_count: 1,
+            bytes_per_pair: 6
+        }
+    ));
+    assert_eq!(
+        acq.functions[&1]
+            .extern_params
+            .iter()
+            .filter(|(k, _)| k == "Cone Voltage")
+            .map(|(_, v)| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["20", "35"]
+    );
+    assert_eq!(
+        acq.functions[&2].status,
+        waters::WatersFunctionStatus::Incomplete
+    );
+}

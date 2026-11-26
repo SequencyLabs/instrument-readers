@@ -6,8 +6,8 @@ use crate::ole::{OLE_MAGIC, OleFile};
 use crate::types::{InstrumentReading, VendorFormat};
 use crate::zip_archive::{ZIP_EOCD_MAGIC, ZIP_LOCAL_MAGIC, ZipArchive};
 use crate::{
-    andi, bruker, chemstation, chromeleon, newstyle, omnic, openlab, shimadzu, thermo, uvtext,
-    waters,
+    andi, bruker, chemstation, chromeleon, masshunter, newstyle, omnic, openlab, shimadzu, thermo,
+    uvtext, waters,
 };
 
 const MNOVA_MAGIC: &[u8] = b"Mestrelab Research S.L.\xf1\xe2\xd3\xc4";
@@ -309,6 +309,11 @@ pub fn read_files(files: &[(&str, &[u8])]) -> Result<InstrumentReading> {
         .find(|(p, b)| detect(Some(p), b) == VendorFormat::AndiCdf)
     {
         return andi::read_cdf(cdf_bytes);
+    }
+
+    let has_masshunter = find_base("MSScan.bin").is_some() && find_base("MSScan.xsd").is_some();
+    if has_masshunter {
+        return masshunter::read_bundle(files);
     }
 
     let has_waters = files.iter().any(|(p, b)| {

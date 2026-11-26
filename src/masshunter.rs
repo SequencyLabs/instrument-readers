@@ -4,9 +4,11 @@
 use std::collections::BTreeMap;
 
 use crate::binary::{
-    decode_text_auto, read_f32_le, read_f64_le, read_i16_le, read_i32_le, read_i64_le, read_u32_le,
+    decode_text_auto, file_name, read_f32_le, read_f64_le, read_i16_le, read_i32_le, read_i64_le,
+    read_u32_le,
 };
 use crate::error::{InstrumentError, Result};
+use crate::types::{InstrumentMethod, InstrumentReading, Technique, Trace, VendorFormat};
 use crate::xml::{elements, parse_xml, trimmed_text};
 
 const MAX_SPECTRUM_BLOCKS: usize = 8;
@@ -175,6 +177,60 @@ impl TofCalibrator {
 type SchemaMap = BTreeMap<String, Vec<(String, String)>>;
 type CalibrationSet = (Vec<[f64; 10]>, BTreeMap<i64, u64>);
 type DefaultMassCal = (BTreeMap<i64, [f64; 10]>, BTreeMap<i64, u64>);
+
+/// Reads an Agilent MassHunter `.d` file bundle into a unified [`InstrumentReading`] with
+/// per-polarity TIC traces.
+pub fn read_bundle(files: &[(&str, &[u8])]) -> Result<InstrumentReading> {
+    let find = |want: &str| {
+        files
+            .iter()
+            .find(|(p, _)| file_name(p).eq_ignore_ascii_case(want))
+            .map(|(_, b)| *b)
+    };
+    let msscan_bin = find("MSScan.bin").ok_or_else(|| {
+        InstrumentError::InvalidMassHunter("MassHunter bundle missing MSScan.bin".to_owned())
+    })?;
+    let msscan_xsd = find("MSScan.xsd").ok_or_else(|| {
+        InstrumentError::InvalidMassHunter("MassHunter bundle missing MSScan.xsd".to_owned())
+    })?;
+    let scans = parse_profile_scans(
+        msscan_bin,
+        msscan_xsd,
+        find("MSTS.xml"),
+        find("MSMassCal.bin"),
+        find("DefaultMassCal.xml"),
+    )?;
+
+    let mut by_pol: BTreeMap<String, Vec<(f64, f64)>> = BTreeMap::new();
+    for scan in scans {
+        if scan.minutes.is_finite() && scan.tic.is_finite() {
+            by_pol
+                .entry(scan.polarity)
+                .or_default()
+                .push((scan.minutes, scan.tic));
+        }
+    }
+    let traces = by_pol
+        .into_iter()
+        .map(|(pol, points)| Trace {
+            label: format!("TIC ({pol})"),
+            x_unit: "min".to_owned(),
+            y_unit: "counts".to_owned(),
+            points,
+        })
+        .collect();
+
+    Ok(InstrumentReading {
+        technique: Technique::LcMs,
+        vendor_format: VendorFormat::AgilentMassHunter,
+        sample_name: None,
+        instrument: None,
+        method: InstrumentMethod::default(),
+        acquired_at: None,
+        traces,
+        peaks: Vec::new(),
+    })
+}
 
 /// Parses `MSScan.bin` (with `MSScan.xsd`, optional `MSTS.xml`, `MSMassCal.bin`, and
 /// `DefaultMassCal.xml`) into ordered MS1 profile scans with per-scan calibration.
