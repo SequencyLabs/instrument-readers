@@ -19,6 +19,11 @@ pub(crate) fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
     Some(u32::from_le_bytes(bytes))
 }
 
+pub(crate) fn read_u32_be(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes: [u8; 4] = data.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
+}
+
 pub(crate) fn read_i32_le(data: &[u8], offset: usize) -> Option<i32> {
     let bytes: [u8; 4] = data.get(offset..offset.checked_add(4)?)?.try_into().ok()?;
     Some(i32::from_le_bytes(bytes))
@@ -37,6 +42,11 @@ pub(crate) fn read_f32_be(data: &[u8], offset: usize) -> Option<f32> {
 pub(crate) fn read_u64_le(data: &[u8], offset: usize) -> Option<u64> {
     let bytes: [u8; 8] = data.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
     Some(u64::from_le_bytes(bytes))
+}
+
+pub(crate) fn read_u64_be(data: &[u8], offset: usize) -> Option<u64> {
+    let bytes: [u8; 8] = data.get(offset..offset.checked_add(8)?)?.try_into().ok()?;
+    Some(u64::from_be_bytes(bytes))
 }
 
 pub(crate) fn read_f64_le(data: &[u8], offset: usize) -> Option<f64> {

@@ -5,7 +5,7 @@ use crate::error::{InstrumentError, Result};
 use crate::ole::{OLE_MAGIC, OleFile};
 use crate::types::{InstrumentReading, VendorFormat};
 use crate::zip_archive::{ZIP_EOCD_MAGIC, ZIP_LOCAL_MAGIC, ZipArchive};
-use crate::{bruker, openlab, shimadzu};
+use crate::{andi, bruker, openlab, shimadzu};
 
 const MNOVA_MAGIC: &[u8] = b"Mestrelab Research S.L.\xf1\xe2\xd3\xc4";
 const FINNIGAN_UTF16: &[u8] = b"F\0i\0n\0n\0i\0g\0a\0n\0";
@@ -196,6 +196,7 @@ pub fn read(filename: Option<&str>, data: &[u8]) -> Result<InstrumentReading> {
         VendorFormat::OpenLabAcaml => openlab::read_acaml(data),
         VendorFormat::OpenLabDx => openlab::read_dx(data),
         VendorFormat::OpenLabRx => openlab::read_rx(data),
+        VendorFormat::AndiCdf => andi::read_cdf(data),
         VendorFormat::BrukerNmr => {
             let base = filename.map(file_name).unwrap_or("").to_ascii_lowercase();
             if matches!(base.as_str(), "procs" | "proc" | "1r" | "1i") {
@@ -254,6 +255,13 @@ pub fn read_files(files: &[(&str, &[u8])]) -> Result<InstrumentReading> {
             }
             other => other,
         });
+    }
+
+    if let Some((_, cdf_bytes)) = files
+        .iter()
+        .find(|(p, b)| detect(Some(p), b) == VendorFormat::AndiCdf)
+    {
+        return andi::read_cdf(cdf_bytes);
     }
 
     read(Some(files[0].0), files[0].1)

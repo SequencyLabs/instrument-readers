@@ -29,6 +29,10 @@ pub enum InstrumentError {
     #[error("invalid OpenLab data: {0}")]
     InvalidOpenLab(String),
 
+    /// An ANDI Chromatography netCDF-3 `.cdf` file is truncated or malformed.
+    #[error("invalid ANDI netCDF data: {0}")]
+    InvalidAndi(String),
+
     /// A ZIP container (`.dx` or `.rx`) is truncated, corrupt, or uses unsupported compression.
     #[error("invalid ZIP container: {0}")]
     InvalidZip(&'static str),
