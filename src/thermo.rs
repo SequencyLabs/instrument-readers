@@ -13,7 +13,7 @@ use crate::binary::{
 use crate::error::{InstrumentError, Result};
 use crate::types::{InstrumentMethod, InstrumentReading, Technique, Trace, VendorFormat};
 
-const MAGIC: &[u8] = b"\x01\xa1F\0i\0n\0n\0i\0g\0a\0n\0";
+pub const MAGIC: &[u8] = b"\x01\xa1F\0i\0n\0n\0i\0g\0a\0n\0";
 const VERSION: u32 = 66;
 const HEADER_LEN: usize = 1356;
 const INJECTION_LEN: usize = 64;
@@ -26,7 +26,7 @@ const CONTROLLER_TABLE_OFF: usize = 0x330;
 const INSTRUMENT_ID_OFF: usize = 0x1D98;
 const SCAN_INDEX_OFF: usize = 0x1CF0;
 const SCAN_ENTRY_LEN: usize = 88;
-const PEAK_RECORD_LEN: usize = 56;
+pub const PEAK_RECORD_LEN: usize = 56;
 const FILETIME_EPOCH_DIFF_SECS: i64 = 11_644_473_600;
 
 /// One sample row from a Thermo Finnigan `.raw` run or `.sld` sequence.
@@ -58,6 +58,13 @@ pub struct ThermoScans {
     pub tic: Vec<f64>,
     pub offsets: Vec<u64>,
     pub data_offset: u64,
+}
+
+/// Physical byte spans of user-written login slots and UTF-16LE strings in a Thermo Finnigan file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThermoTextSpans {
+    pub logins: Vec<(usize, usize, usize)>,
+    pub strings: Vec<(usize, usize)>,
 }
 
 fn parse_run_with_offset(data: &[u8]) -> Result<(ThermoFile, Option<usize>)> {
@@ -117,10 +124,85 @@ pub fn parse_run(data: &[u8]) -> Result<ThermoFile> {
 /// Parses the header and all sample rows from a Thermo `.sld` sequence file.
 pub fn parse_sequence(data: &[u8]) -> Result<ThermoFile> {
     let mut file = parse_header(data)?;
+    let (_, row_span_list) = sequence_spans(data)?;
+    file.rows = row_span_list
+        .iter()
+        .map(|spans| decode_row(data, spans))
+        .collect();
+    Ok(file)
+}
+
+/// Returns physical byte spans for the four header login slots and every UTF-16LE string field.
+pub fn text_spans(data: &[u8], is_sequence: bool) -> Result<ThermoTextSpans> {
+    if !data.starts_with(MAGIC) {
+        return Err(InstrumentError::InvalidThermo(
+            "not a Thermo Finnigan file".to_owned(),
+        ));
+    }
+    let mut logins = Vec::with_capacity(LOGIN_OFFSETS.len());
+    for off in LOGIN_OFFSETS {
+        let slice = data.get(off..off + LOGIN_BYTES).ok_or_else(truncated)?;
+        let units: Vec<u16> = slice
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| u16::from_le_bytes(c))
+            .collect();
+        String::from_utf16(&units).map_err(|_| {
+            InstrumentError::InvalidThermo(format!("invalid UTF-16LE in login slot at byte {off}"))
+        })?;
+        let nul_units = units.iter().position(|&u| u == 0).unwrap_or(units.len());
+        logins.push((off, off + nul_units * 2, off + LOGIN_BYTES));
+    }
+    let strings = if is_sequence {
+        let (labels, rows) = sequence_spans(data)?;
+        let mut all = labels;
+        for row in rows {
+            all.extend(row);
+        }
+        all
+    } else {
+        row_spans(data, HEADER_LEN)?.0
+    };
+    Ok(ThermoTextSpans { logins, strings })
+}
+
+/// Returns the `(offset, length)` byte ranges to read scan bounds and index pointers from an MS run header.
+pub fn ms_header_ranges(header_offset: u64) -> Result<((u64, usize), (u64, usize))> {
+    let bounds_off = header_offset.checked_add(8).ok_or_else(truncated)?;
+    let index_off = header_offset
+        .checked_add(SCAN_INDEX_OFF as u64)
+        .ok_or_else(truncated)?;
+    Ok(((bounds_off, 8), (index_off, 16)))
+}
+
+/// Decodes the 8-byte scan bounds and 16-byte index/data pointers into `(index_offset, index_bytes, data_offset)`.
+pub fn decode_scan_range(bounds: &[u8], pointers: &[u8]) -> Result<(u64, usize, u64)> {
+    let first = read_u32_le(bounds, 0).ok_or_else(truncated)?;
+    let last = read_u32_le(bounds, 4).ok_or_else(truncated)?;
+    let index_offset = read_u64_le(pointers, 0).ok_or_else(truncated)?;
+    let data_offset = read_u64_le(pointers, 8).ok_or_else(truncated)?;
+    let count = if last != 0 && last >= first {
+        u64::from(last) - u64::from(first) + 1
+    } else {
+        0
+    };
+    let count_usize = usize::try_from(count).map_err(|_| truncated())?;
+    let index_bytes = count_usize
+        .checked_mul(SCAN_ENTRY_LEN)
+        .ok_or_else(truncated)?;
+    Ok((index_offset, index_bytes, data_offset))
+}
+
+type SequenceSpans = (Vec<(usize, usize)>, Vec<Vec<(usize, usize)>>);
+
+fn sequence_spans(data: &[u8]) -> Result<SequenceSpans> {
+    let mut labels = Vec::with_capacity(5);
     let mut at = SEQUENCE_LABELS_OFF;
     for _ in 0..5 {
-        let (_, end) = string_span(data, at)?;
-        at = end;
+        let span = string_span(data, at)?;
+        at = span.1;
+        labels.push(span);
     }
     let count_off = at.checked_add(64).ok_or_else(truncated)?;
     let count = read_u32_le(data, count_off).ok_or_else(truncated)? as usize;
@@ -134,11 +216,10 @@ pub fn parse_sequence(data: &[u8]) -> Result<ThermoFile> {
     let mut rows = Vec::with_capacity(count);
     for _ in 0..count {
         let (spans, next_at) = row_spans(data, at)?;
-        rows.push(decode_row(data, &spans));
+        rows.push(spans);
         at = next_at;
     }
-    file.rows = rows;
-    Ok(file)
+    Ok((labels, rows))
 }
 
 /// Returns the mass spectrometer run header file offset (controller type 0), if present.
@@ -363,4 +444,91 @@ fn parse_filetime_plus_0800(data: &[u8], at: usize) -> Result<String> {
 
 fn truncated() -> InstrumentError {
     InstrumentError::InvalidThermo("Finnigan file truncated".to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn utf16_field(text: &str) -> Vec<u8> {
+        let units: Vec<u16> = text.encode_utf16().collect();
+        let mut out = Vec::with_capacity(4 + units.len() * 2);
+        out.extend_from_slice(&(units.len() as u32).to_le_bytes());
+        for u in units {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+        out
+    }
+
+    fn synthetic_header(login: &str) -> Vec<u8> {
+        let mut buf = vec![0u8; HEADER_LEN];
+        buf[..MAGIC.len()].copy_from_slice(MAGIC);
+        buf[0x24..0x28].copy_from_slice(&VERSION.to_le_bytes());
+        let login_bytes: Vec<u8> = login.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        buf[0x30..0x30 + login_bytes.len()].copy_from_slice(&login_bytes);
+        buf
+    }
+
+    fn synthetic_row(sample: &str) -> Vec<u8> {
+        let mut out = vec![0u8; INJECTION_LEN];
+        for i in 0..31 {
+            if i == 16 {
+                out.extend_from_slice(&0u32.to_le_bytes());
+            }
+            let text = if i == 1 { sample } else { "" };
+            out.extend_from_slice(&utf16_field(text));
+        }
+        out
+    }
+
+    #[test]
+    fn text_spans_finds_logins_and_row_strings_in_run_and_sequence() {
+        let mut run = synthetic_header("LAB\\alice");
+        run.extend_from_slice(&synthetic_row("TBP-1"));
+        let spans = text_spans(&run, false).expect("run spans");
+        assert_eq!(spans.logins.len(), 4);
+        let (s, e, slot_end) = spans.logins[0];
+        assert_eq!(decode_utf16le(&run[s..e]), "LAB\\alice");
+        assert_eq!(slot_end - s, LOGIN_BYTES);
+        assert_eq!(spans.strings.len(), 31);
+        let (rs, re) = spans.strings[1];
+        assert_eq!(decode_utf16le(&run[rs..re]), "TBP-1");
+
+        let mut seq = synthetic_header("LAB\\bob");
+        seq.resize(SEQUENCE_LABELS_OFF, 0);
+        for label in ["L1", "L2", "L3", "L4", "L5"] {
+            seq.extend_from_slice(&utf16_field(label));
+        }
+        seq.extend_from_slice(&[0u8; 64]);
+        seq.extend_from_slice(&1u32.to_le_bytes());
+        seq.extend_from_slice(&synthetic_row("SEQ-1"));
+        let seq_spans = text_spans(&seq, true).expect("sequence spans");
+        assert_eq!(seq_spans.strings.len(), 5 + 31);
+        assert_eq!(
+            decode_utf16le(&seq[seq_spans.strings[0].0..seq_spans.strings[0].1]),
+            "L1"
+        );
+        assert_eq!(
+            decode_utf16le(&seq[seq_spans.strings[6].0..seq_spans.strings[6].1]),
+            "SEQ-1"
+        );
+    }
+
+    #[test]
+    fn ms_header_ranges_and_decode_scan_range_match_layout() {
+        let ((b_off, b_len), (p_off, p_len)) = ms_header_ranges(1000).expect("ranges");
+        assert_eq!((b_off, b_len), (1008, 8));
+        assert_eq!((p_off, p_len), (1000 + SCAN_INDEX_OFF as u64, 16));
+
+        let mut bounds = Vec::new();
+        bounds.extend_from_slice(&1u32.to_le_bytes());
+        bounds.extend_from_slice(&10u32.to_le_bytes());
+        let mut pointers = Vec::new();
+        pointers.extend_from_slice(&4096u64.to_le_bytes());
+        pointers.extend_from_slice(&8192u64.to_le_bytes());
+        assert_eq!(
+            decode_scan_range(&bounds, &pointers).expect("scan range"),
+            (4096, 10 * SCAN_ENTRY_LEN, 8192)
+        );
+    }
 }

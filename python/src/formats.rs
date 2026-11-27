@@ -177,6 +177,14 @@ pub struct ThermoScans {
     pub data_offset: u64,
 }
 
+/// Physical byte spans of user-written login slots and UTF-16LE strings in a Thermo Finnigan file.
+#[pyclass(get_all)]
+#[derive(Clone)]
+pub struct ThermoTextSpans {
+    pub logins: Vec<(usize, usize, usize)>,
+    pub strings: Vec<(usize, usize)>,
+}
+
 #[pyfunction]
 pub fn thermo_parse_run(data: &[u8]) -> PyResult<ThermoFile> {
     py_result(thermo::parse_run(data)).map(Into::into)
@@ -188,8 +196,28 @@ pub fn thermo_parse_sequence(data: &[u8]) -> PyResult<ThermoFile> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (data, is_sequence=false))]
+pub fn thermo_text_spans(data: &[u8], is_sequence: bool) -> PyResult<ThermoTextSpans> {
+    let spans = py_result(thermo::text_spans(data, is_sequence))?;
+    Ok(ThermoTextSpans {
+        logins: spans.logins,
+        strings: spans.strings,
+    })
+}
+
+#[pyfunction]
 pub fn thermo_ms_header_offset(data: &[u8]) -> PyResult<Option<u64>> {
     py_result(thermo::ms_header_offset(data))
+}
+
+#[pyfunction]
+pub fn thermo_ms_header_ranges(header_offset: u64) -> PyResult<((u64, usize), (u64, usize))> {
+    py_result(thermo::ms_header_ranges(header_offset))
+}
+
+#[pyfunction]
+pub fn thermo_decode_scan_range(bounds: &[u8], pointers: &[u8]) -> PyResult<(u64, usize, u64)> {
+    py_result(thermo::decode_scan_range(bounds, pointers))
 }
 
 #[pyfunction]
@@ -505,6 +533,9 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ThermoRow>()?;
     m.add_class::<ThermoFile>()?;
     m.add_class::<ThermoScans>()?;
+    m.add_class::<ThermoTextSpans>()?;
+    m.add("THERMO_MAGIC", PyBytes::new(m.py(), thermo::MAGIC))?;
+    m.add("THERMO_PEAK_RECORD_LEN", thermo::PEAK_RECORD_LEN)?;
     m.add_class::<WatersUvChannel>()?;
     m.add_class::<WatersPolarityRun>()?;
     m.add_class::<MassHunterScan>()?;
@@ -520,7 +551,10 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(uvtext_parse, m)?)?;
     m.add_function(wrap_pyfunction!(thermo_parse_run, m)?)?;
     m.add_function(wrap_pyfunction!(thermo_parse_sequence, m)?)?;
+    m.add_function(wrap_pyfunction!(thermo_text_spans, m)?)?;
     m.add_function(wrap_pyfunction!(thermo_ms_header_offset, m)?)?;
+    m.add_function(wrap_pyfunction!(thermo_ms_header_ranges, m)?)?;
+    m.add_function(wrap_pyfunction!(thermo_decode_scan_range, m)?)?;
     m.add_function(wrap_pyfunction!(thermo_decode_scan_index, m)?)?;
     m.add_function(wrap_pyfunction!(thermo_decode_peak_record, m)?)?;
     m.add_function(wrap_pyfunction!(thermo_decode_peak_pairs, m)?)?;
